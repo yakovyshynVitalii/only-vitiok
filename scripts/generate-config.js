@@ -5,6 +5,9 @@ const { spawnSync } = require("child_process");
 
 const TARGET_GLOBAL_HASHTAGS = 15;
 const MAX_ITEM_HASHTAGS = 8;
+const MIN_ITEM_HASHTAGS = 4;
+const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵"];
+const DESCRIPTION_EMOJIS = ["💦", "🌶", "🖤", "💞", "🔞"];
 const IMAGE_EXTENSIONS = new Set([
   ".jpg",
   ".jpeg",
@@ -62,9 +65,15 @@ function getEnv() {
     throw new Error("OLLAMA_URL не задано. Додай OLLAMA_URL у .env");
   }
 
+  const parsedConcurrency = Number(process.env.AI_ANALYSIS_CONCURRENCY || 3);
+  const aiConcurrency = Number.isFinite(parsedConcurrency)
+    ? Math.max(1, Math.min(8, Math.round(parsedConcurrency)))
+    : 3;
+
   return {
     OLLAMA_URL: ollamaUrl,
     OLLAMA_MODEL: process.env.OLLAMA_MODEL || "llava:13b",
+    AI_ANALYSIS_CONCURRENCY: aiConcurrency,
     MEDIA_FOLDER: path.resolve(process.env.MEDIA_FOLDER || "./media"),
     TAG_CATEGORIES_PATH: path.resolve(
       process.env.TAG_CATEGORIES_PATH || "./tag-categories.txt"
@@ -151,11 +160,16 @@ function filterModelTags(tags, allowedTagSet) {
 }
 
 function normalizeItemTags(tags, globalTags) {
-  const normalized = [
-    ...new Set((tags || []).map(normalizeHashtag).filter(Boolean)),
-  ];
-  const intersection = normalized.filter((tag) => globalTags.includes(tag));
-  return intersection.slice(0, MAX_ITEM_HASHTAGS);
+  const ownTags = [...new Set((tags || []).map(normalizeHashtag).filter(Boolean))];
+  const merged = [...ownTags];
+
+  for (const tag of globalTags || []) {
+    if (merged.length >= Math.max(MIN_ITEM_HASHTAGS, MAX_ITEM_HASHTAGS)) break;
+    if (!merged.includes(tag)) merged.push(tag);
+  }
+
+  if (!merged.length) return [];
+  return merged.slice(0, MAX_ITEM_HASHTAGS);
 }
 
 function sanitizeEnglishText(value, fallback = "") {
@@ -170,7 +184,23 @@ function sanitizeEnglishText(value, fallback = "") {
   return cleaned || fallback;
 }
 
-function enforceSexyTone(text, isTitle = false) {
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const mm = String(Math.floor(total / 60)).padStart(2, "0");
+  const ss = String(total % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function pickEmoji(seed, pool) {
+  const source = String(seed || "default");
+  let hash = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    hash = (hash * 31 + source.charCodeAt(i)) % 2147483647;
+  }
+  return pool[Math.abs(hash) % pool.length];
+}
+
+function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
   const base = String(text || "").trim();
   const sexyKeywords =
     /(sexy|sensual|erotic|seductive|intimate|alluring|adult|glamour)/i;
@@ -183,7 +213,7 @@ function enforceSexyTone(text, isTitle = false) {
   const hasEmoji = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(
     withTone
   );
-  return hasEmoji ? withTone : `${withTone} 🔥`;
+  return hasEmoji ? withTone : `${withTone} ${emoji}`;
 }
 
 function detectMediaType(filePath) {
@@ -407,8 +437,19 @@ async function callVisionModel({
     parsed.description,
     `Sexy media content ${sanitizeEnglishText(filename, "content")}`
   );
-  const sexyTitle = enforceSexyTone(title, true);
-  const sexyDescription = enforceSexyTone(description, false);
+  const titleEmoji = pickEmoji(`${filename}:title`, TITLE_EMOJIS);
+  const descriptionEmoji = pickEmoji(
+    `${filename}:description`,
+    DESCRIPTION_EMOJIS
+  );
+  const sexyTitle = enforceSexyTone(title, {
+    isTitle: true,
+    emoji: titleEmoji,
+  });
+  const sexyDescription = enforceSexyTone(description, {
+    isTitle: false,
+    emoji: descriptionEmoji,
+  });
   const aiVip = Boolean(parsed.vip);
   const allowedTagSet = new Set(allowedTags);
   const hashtags = filterModelTags(parsed.hashtags || [], allowedTagSet);
@@ -473,8 +514,33 @@ async function buildConfig(env) {
   }
 
   const items = [];
+  const concurrency = env.AI_ANALYSIS_CONCURRENCY || 3;
+  const total = files.length;
+  const startedAt = Date.now();
+  let completed = 0;
+  let fallbackCount = 0;
 
-  for (const file of files) {
+  function renderProgress() {
+    const elapsedSec = (Date.now() - startedAt) / 1000;
+    const percent = Math.round((completed / total) * 100);
+    const avgPerItem = completed > 0 ? elapsedSec / completed : 0;
+    const remaining = Math.max(0, total - completed);
+    const etaSec = avgPerItem * remaining;
+    const line =
+      `📊 Аналіз: ${completed}/${total} (${percent}%)` +
+      ` | fallback: ${fallbackCount}` +
+      ` | elapsed: ${formatDuration(elapsedSec)}` +
+      ` | eta: ${formatDuration(etaSec)}`;
+
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r${line}`);
+      if (completed === total) process.stdout.write("\n");
+    } else {
+      console.log(line);
+    }
+  }
+
+  async function analyzeFile(file) {
     const fullPath = path.join(env.MEDIA_FOLDER, file);
     const mediaType = detectMediaType(fullPath);
     const videoDurationSeconds =
@@ -489,6 +555,7 @@ async function buildConfig(env) {
     );
 
     let ai;
+    let usedFallback = false;
     try {
       ai = await callVisionModel({
         filePath: fullPath,
@@ -498,6 +565,7 @@ async function buildConfig(env) {
         allowedTags,
       });
     } catch (err) {
+      usedFallback = true;
       console.log(`⚠️  AI аналіз не вдався для ${file}: ${err.message}`);
       const fallbackTag =
         normalizeHashtag(path.parse(file).name.split(/[\s._-]/)[0]) || "media";
@@ -516,7 +584,7 @@ async function buildConfig(env) {
       };
     }
 
-    items.push({
+    return {
       filePath: fullPath,
       fileName: file,
       mediaType,
@@ -526,7 +594,24 @@ async function buildConfig(env) {
       vip: Boolean(ai.vip),
       videoDurationSeconds: ai.videoDurationSeconds,
       uploaded: false,
-    });
+      usedFallback,
+    };
+  }
+
+  renderProgress();
+  for (let i = 0; i < files.length; i += concurrency) {
+    const batch = files.slice(i, i + concurrency);
+    const batchResults = await Promise.all(batch.map((file) => analyzeFile(file)));
+    for (const result of batchResults) {
+      items.push(result);
+      completed += 1;
+      if (result.usedFallback) fallbackCount += 1;
+      renderProgress();
+    }
+  }
+
+  for (const item of items) {
+    delete item.usedFallback;
   }
 
   const rankedGlobal = rankGlobalHashtags(items).filter((tag) =>
