@@ -1,5 +1,5 @@
 {
-  "name": "onlynice-bot",
+  "name": "only-vitiok",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
@@ -16,5 +16,8 @@
   "description": "",
   "devDependencies": {
     "playwright": "^1.58.2"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1"
   }
 }

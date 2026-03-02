@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+require("dotenv").config();
 
 (async () => {
   const baseUrl = process.env.BASE_URL;
