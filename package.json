@@ -1,0 +1,20 @@
+{
+  "name": "onlynice-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "login": "node login.js",
+    "generate-config": "node scripts/generate-config.js",
+    "upload": "node upload.js",
+    "add-tags": "node add-tags.js",
+    "vitiok": "npm run generate-config && npm run add-tags && npm run upload"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "playwright": "^1.58.2"
+  }
+}
