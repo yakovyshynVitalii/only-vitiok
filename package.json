@@ -4,11 +4,11 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "login": "node login.js",
+    "login": "node scripts/login.js",
     "generate-config": "node scripts/generate-config.js",
-    "upload": "node upload.js",
-    "add-tags": "node add-tags.js",
-    "vitiok": "npm run generate-config && npm run add-tags && npm run upload"
+    "upload": "node scripts/upload.js",
+    "add-tags": "node scripts/add-tags.js",
+    "vitiok": "node vitiok-pipeline.js"
   },
   "keywords": [],
   "author": "",

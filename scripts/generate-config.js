@@ -76,7 +76,7 @@ function getEnv() {
     AI_ANALYSIS_CONCURRENCY: aiConcurrency,
     MEDIA_FOLDER: path.resolve(process.env.MEDIA_FOLDER || "./media"),
     TAG_CATEGORIES_PATH: path.resolve(
-      process.env.TAG_CATEGORIES_PATH || "./tag-categories.txt"
+      process.env.TAG_CATEGORIES_PATH || "./config/tag-categories.txt"
     ),
     MEDIA_CONFIG_PATH: path.resolve(
       process.env.MEDIA_CONFIG_PATH || "./media-config.json"
@@ -138,7 +138,11 @@ function loadAllowedTags(filePath) {
   return unique;
 }
 
-function ensureTagRange(tags, target = TARGET_GLOBAL_HASHTAGS, fallbackPool = []) {
+function ensureTagRange(
+  tags,
+  target = TARGET_GLOBAL_HASHTAGS,
+  fallbackPool = []
+) {
   const unique = [
     ...new Set((tags || []).map(normalizeHashtag).filter(Boolean)),
   ];
@@ -160,7 +164,9 @@ function filterModelTags(tags, allowedTagSet) {
 }
 
 function normalizeItemTags(tags, globalTags) {
-  const ownTags = [...new Set((tags || []).map(normalizeHashtag).filter(Boolean))];
+  const ownTags = [
+    ...new Set((tags || []).map(normalizeHashtag).filter(Boolean)),
+  ];
   const merged = [...ownTags];
 
   for (const tag of globalTags || []) {
@@ -189,6 +195,13 @@ function formatDuration(seconds) {
   const mm = String(Math.floor(total / 60)).padStart(2, "0");
   const ss = String(total % 60).padStart(2, "0");
   return `${mm}:${ss}`;
+}
+
+function createProgressBar(percent, width = 24) {
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+  const filled = Math.round((safePercent / 100) * width);
+  const empty = Math.max(0, width - filled);
+  return `[${"█".repeat(filled)}${"░".repeat(empty)}]`;
 }
 
 function pickEmoji(seed, pool) {
@@ -355,14 +368,16 @@ async function callVisionModel({
     "Поверни тільки JSON (без markdown):",
     '{"title":"...","description":"...","hashtags":["fashion","lingerie"],"vip":true}',
     "Правила:",
-    "- title: only English, short, up to 60 chars, sexual/sensual tone",
-    "- description: only English, 1-2 sentences, up to 220 chars, sexual/sensual tone",
+    "- title: only English, short, up to 60 chars, sexual tone",
+    "- description: only English, 1-2 sentences, up to 220 chars, sexual tone",
     "- emoji are allowed and recommended in title/description",
     "- hashtags: generate 8-12 tags for THIS media only (not one common set for all files)",
     "- hashtags must be sexualized and relevant to visible details in this media",
     "- include at least 3 specific tags that may NOT fit other media files",
     "- avoid neutral tags: holiday, music, style, photo, model, art",
-    `- use tags only from allowed list: ${allowedTags.slice(0, 120).join(", ")}`,
+    `- use tags only from allowed list: ${allowedTags
+      .slice(0, 120)
+      .join(", ")}`,
     "- vip: boolean true/false",
     "- for images: vip=true if content is highly nude/pornographic, else false",
     "- for videos: vip will be calculated by code using duration only",
@@ -457,7 +472,9 @@ async function callVisionModel({
     mediaType === "video" &&
     Number.isFinite(videoDurationSeconds) &&
     videoDurationSeconds > 60;
-  const explicitTagHit = hashtags.some((tag) => EXPLICIT_VIP_KEYWORDS.test(tag));
+  const explicitTagHit = hashtags.some((tag) =>
+    EXPLICIT_VIP_KEYWORDS.test(tag)
+  );
   const explicitTextHit = EXPLICIT_VIP_KEYWORDS.test(
     `${sexyTitle} ${sexyDescription}`
   );
@@ -519,22 +536,51 @@ async function buildConfig(env) {
   const startedAt = Date.now();
   let completed = 0;
   let fallbackCount = 0;
+  let lastProgressLineLength = 0;
+  let spinnerIndex = 0;
+  const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+  function clearProgressLine() {
+    if (!process.stdout.isTTY) return;
+    process.stdout.write(`\r${" ".repeat(lastProgressLineLength)}\r`);
+  }
+
+  function logInfo(message) {
+    if (process.stdout.isTTY) {
+      clearProgressLine();
+      console.log(message);
+      if (completed < total) renderProgress();
+      return;
+    }
+    console.log(message);
+  }
 
   function renderProgress() {
     const elapsedSec = (Date.now() - startedAt) / 1000;
-    const percent = Math.round((completed / total) * 100);
+    const percent = total > 0 ? (completed / total) * 100 : 0;
+    const roundedPercent = Math.round(percent);
     const avgPerItem = completed > 0 ? elapsedSec / completed : 0;
     const remaining = Math.max(0, total - completed);
     const etaSec = avgPerItem * remaining;
+    const bar = createProgressBar(percent);
+    const spinner = spinnerFrames[spinnerIndex % spinnerFrames.length];
+    spinnerIndex += 1;
     const line =
-      `📊 Аналіз: ${completed}/${total} (${percent}%)` +
+      `📊 ${spinner} Аналіз ${bar} ${roundedPercent}% (${completed}/${total})` +
       ` | fallback: ${fallbackCount}` +
       ` | elapsed: ${formatDuration(elapsedSec)}` +
       ` | eta: ${formatDuration(etaSec)}`;
 
     if (process.stdout.isTTY) {
-      process.stdout.write(`\r${line}`);
-      if (completed === total) process.stdout.write("\n");
+      const paddedLine =
+        line.length < lastProgressLineLength
+          ? line + " ".repeat(lastProgressLineLength - line.length)
+          : line;
+      process.stdout.write(`\r${paddedLine}`);
+      lastProgressLineLength = Math.max(lastProgressLineLength, line.length);
+      if (completed === total) {
+        process.stdout.write("\n");
+      }
     } else {
       console.log(line);
     }
@@ -545,14 +591,6 @@ async function buildConfig(env) {
     const mediaType = detectMediaType(fullPath);
     const videoDurationSeconds =
       mediaType === "video" ? getVideoDurationSeconds(fullPath) : null;
-
-    console.log(
-      `🔎 Аналізую: ${file} (${mediaType}${
-        Number.isFinite(videoDurationSeconds)
-          ? `, ${Math.round(videoDurationSeconds)}s`
-          : ""
-      })`
-    );
 
     let ai;
     let usedFallback = false;
@@ -566,7 +604,7 @@ async function buildConfig(env) {
       });
     } catch (err) {
       usedFallback = true;
-      console.log(`⚠️  AI аналіз не вдався для ${file}: ${err.message}`);
+      logInfo(`⚠️  AI аналіз не вдався для ${file}: ${err.message}`);
       const fallbackTag =
         normalizeHashtag(path.parse(file).name.split(/[\s._-]/)[0]) || "media";
       const durationVip =
@@ -601,7 +639,9 @@ async function buildConfig(env) {
   renderProgress();
   for (let i = 0; i < files.length; i += concurrency) {
     const batch = files.slice(i, i + concurrency);
-    const batchResults = await Promise.all(batch.map((file) => analyzeFile(file)));
+    const batchResults = await Promise.all(
+      batch.map((file) => analyzeFile(file))
+    );
     for (const result of batchResults) {
       items.push(result);
       completed += 1;
@@ -617,7 +657,11 @@ async function buildConfig(env) {
   const rankedGlobal = rankGlobalHashtags(items).filter((tag) =>
     allowedTagSet.has(tag)
   );
-  const hashtags = ensureTagRange(rankedGlobal, TARGET_GLOBAL_HASHTAGS, allowedTags);
+  const hashtags = ensureTagRange(
+    rankedGlobal,
+    TARGET_GLOBAL_HASHTAGS,
+    allowedTags
+  );
 
   for (const item of items) {
     const itemTags = normalizeItemTags(item.hashtags, hashtags);

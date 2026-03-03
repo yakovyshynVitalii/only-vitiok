@@ -15,8 +15,8 @@
 
 1. `scripts/generate-config.js` бере медіа з `MEDIA_FOLDER`.
 2. Для кожного файлу запитує Ollama (з урахуванням `AI_ANALYSIS_CONCURRENCY`).
-3. Нормалізує текст, фільтрує теги через `tag-categories.txt`, збирає фінальний `media-config.json`.
-4. `upload.js` завантажує файли й заповнює `title/description/hashtags`.
+3. Нормалізує текст, фільтрує теги через `config/tag-categories.txt`, збирає фінальний `media-config.json`.
+4. `scripts/upload.js` завантажує файли й заповнює `title/description/hashtags`.
 
 ## Швидкий старт
 
@@ -37,7 +37,7 @@ ollama list
 4. Увійди в акаунт (збереже сесію для Playwright):
 
 ```bash
-node login.js
+node scripts/login.js
 ```
 
 5. Згенеруй конфіг:
@@ -78,11 +78,11 @@ npm run vitiok
 - `AI_ANALYSIS_CONCURRENCY` - кількість одночасних AI-запитів (типово: `3`, безпечний діапазон: `3-5`).
 - `MEDIA_FOLDER` - папка з файлами (типово: `./media`).
 - `MEDIA_CONFIG_PATH` - шлях для збереження конфіга (типово: `./media-config.json`).
-- `TAG_CATEGORIES_PATH` - файл дозволених тегів (типово: `./tag-categories.txt`).
+- `TAG_CATEGORIES_PATH` - файл дозволених тегів (типово: `./config/tag-categories.txt`).
 
 ## Теги
 
-- Редагуй дозволені теги у `tag-categories.txt`.
+- Редагуй дозволені теги у `config/tag-categories.txt`.
 - Генератор використовує тільки теги з цього файлу.
 - Для кожного медіа зберігаються індивідуальні теги, а глобальні використовуються як доповнення.
 
@@ -95,5 +95,5 @@ npm run vitiok
 ## Діагностика
 
 - Повільно працює: зменш/збільш `AI_ANALYSIS_CONCURRENCY` (почни з `3`, далі `4-5`).
-- Дивні теги: перевір `tag-categories.txt` та якість вихідних файлів.
+- Дивні теги: перевір `config/tag-categories.txt` та якість вихідних файлів.
 - Помилка підключення: перевір, що `ollama serve` запущений і `OLLAMA_URL` правильний.
