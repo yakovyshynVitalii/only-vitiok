@@ -10,7 +10,9 @@ function getEnv() {
 
   return {
     CREATE_URL: createUrl,
-    MEDIA_CONFIG_PATH: path.resolve(process.env.MEDIA_CONFIG_PATH || "./media-config.json"),
+    MEDIA_CONFIG_PATH: path.resolve(
+      process.env.MEDIA_CONFIG_PATH || "./media-config.json"
+    ),
     HEADLESS: String(process.env.HEADLESS || "false").toLowerCase() === "true",
   };
 }
@@ -42,7 +44,23 @@ function readConfig(env) {
 }
 
 function writeConfig(config, env) {
-  fs.writeFileSync(env.MEDIA_CONFIG_PATH, JSON.stringify(config, null, 2), "utf8");
+  fs.writeFileSync(
+    env.MEDIA_CONFIG_PATH,
+    JSON.stringify(config, null, 2),
+    "utf8"
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isFileInputDetachTimeout(err) {
+  const message = String((err && err.message) || "");
+  return (
+    message.includes("locator.waitFor: Timeout 60000ms exceeded.") &&
+    message.includes("waiting for locator('input[type=\"file\"]') to be detached")
+  );
 }
 
 async function fillFieldIfExists(page, selectors, value) {
@@ -69,7 +87,9 @@ function normalizeTagValue(value) {
 }
 
 async function applyExistingHashtags(page, hashtags) {
-  const wanted = new Set((hashtags || []).map(normalizeTagValue).filter(Boolean));
+  const wanted = new Set(
+    (hashtags || []).map(normalizeTagValue).filter(Boolean)
+  );
   if (!wanted.size) return;
 
   const chips = page.locator("span.inline-flex:has(.i-solar\\:tag-outline)");
@@ -99,7 +119,9 @@ async function applyExistingHashtags(page, hashtags) {
 async function applyVipFlag(page, vip) {
   if (!vip) return;
 
-  const vipCheckbox = page.locator('input[type="checkbox"][name="vip"]').first();
+  const vipCheckbox = page
+    .locator('input[type="checkbox"][name="vip"]')
+    .first();
   if ((await vipCheckbox.count()) === 0) {
     console.log("⚠️  VIP чекбокс не знайдено");
     return;
@@ -152,15 +174,21 @@ async function fillMetadata(page, item) {
 
 async function clickDoneButton(page) {
   const doneButton = page
-    .locator('button:has-text("Done"), button:has-text("Готово"), button:has-text("Готов"):visible')
+    .locator(
+      'button:has-text("Done"), button:has-text("Готово"), button:has-text("Готов"):visible'
+    )
     .first();
 
   await doneButton.waitFor({ state: "visible", timeout: 60000 });
   await doneButton.scrollIntoViewIfNeeded().catch(() => {});
 
-  await page.waitForFunction((el) => !!el && !el.disabled, await doneButton.elementHandle(), {
-    timeout: 10 * 60 * 1000,
-  });
+  await page.waitForFunction(
+    (el) => !!el && !el.disabled,
+    await doneButton.elementHandle(),
+    {
+      timeout: 10 * 60 * 1000,
+    }
+  );
 
   try {
     await doneButton.click({ timeout: 5000 });
@@ -169,7 +197,7 @@ async function clickDoneButton(page) {
   }
 }
 
-(async () => {
+async function runUploadOnce() {
   loadDotEnv();
   const env = getEnv();
 
@@ -178,12 +206,14 @@ async function clickDoneButton(page) {
 
   if (!pendingItems.length) {
     console.log("✅ Усі файли в конфізі вже завантажені");
-    return;
+    return { retryRequested: false };
   }
 
   const browser = await chromium.launch({ headless: env.HEADLESS });
   const context = await browser.newContext({ storageState: "state.json" });
   const page = await context.newPage();
+  let retryRequested = false;
+  let lastErrorMessage = "";
 
   await page.goto(env.CREATE_URL, { waitUntil: "networkidle" });
   await page.waitForTimeout(1500);
@@ -225,15 +255,61 @@ async function clickDoneButton(page) {
       fs.unlinkSync(filePath);
       console.log(`✅ Завантажено і видалено: ${filePath}`);
 
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(5000);
     } catch (err) {
       item.error = err.message;
       writeConfig(config, env);
       console.log(`❌ Помилка з файлом: ${filePath}`);
       console.log(err.message);
+      lastErrorMessage = err.message || "unknown_upload_error";
+
+      if (isFileInputDetachTimeout(err)) {
+        retryRequested = true;
+        console.log(
+          "⏳ Отримано таймаут detach для file input. Перезапущу upload через 60 секунд."
+        );
+      }
       break;
     }
   }
 
   await browser.close();
-})();
+  if (retryRequested) {
+    return { retryRequested: true };
+  }
+
+  if (lastErrorMessage) {
+    throw new Error(lastErrorMessage);
+  }
+
+  return { retryRequested: false };
+}
+
+(async () => {
+  loadDotEnv();
+
+  const retryDelayMs = Number(process.env.UPLOAD_RETRY_DELAY_MS || 60000);
+  const maxAttempts = Number(process.env.UPLOAD_RESTART_ATTEMPTS || 3);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const { retryRequested } = await runUploadOnce();
+    if (!retryRequested) return;
+
+    if (attempt === maxAttempts) {
+      throw new Error(
+        `Upload не вдався після ${maxAttempts} спроб (таймаут на detach file input).`
+      );
+    }
+
+    const nextAttempt = attempt + 1;
+    console.log(
+      `🔁 Спроба ${nextAttempt}/${maxAttempts} стартує через ${Math.round(
+        retryDelayMs / 1000
+      )} сек...`
+    );
+    await sleep(retryDelayMs);
+  }
+})().catch((err) => {
+  console.error("❌ upload failed:", err.message);
+  process.exit(1);
+});

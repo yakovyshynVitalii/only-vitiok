@@ -190,6 +190,15 @@ function sanitizeEnglishText(value, fallback = "") {
   return cleaned || fallback;
 }
 
+function removeOverusedTitleWords(title, fallback = "Sexy moment") {
+  const cleaned = String(title || "")
+    .replace(/\bsensual\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleaned || fallback;
+}
+
 function formatDuration(seconds) {
   const total = Math.max(0, Math.floor(Number(seconds) || 0));
   const mm = String(Math.floor(total / 60)).padStart(2, "0");
@@ -215,18 +224,15 @@ function pickEmoji(seed, pool) {
 
 function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
   const base = String(text || "").trim();
-  const sexyKeywords =
-    /(sexy|sensual|erotic|seductive|intimate|alluring|adult|glamour)/i;
-  const withTone = sexyKeywords.test(base)
-    ? base
-    : isTitle
-    ? `${base} sensual`
-    : `${base} Sensual and seductive mood.`;
+  if (!base) {
+    const fallback = isTitle ? "Sexy moment" : "Seductive mood.";
+    return `${fallback} ${emoji}`;
+  }
 
   const hasEmoji = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(
-    withTone
+    base
   );
-  return hasEmoji ? withTone : `${withTone} ${emoji}`;
+  return hasEmoji ? base : `${base} ${emoji}`;
 }
 
 function detectMediaType(filePath) {
@@ -457,7 +463,8 @@ async function callVisionModel({
     `${filename}:description`,
     DESCRIPTION_EMOJIS
   );
-  const sexyTitle = enforceSexyTone(title, {
+  const cleanedTitle = removeOverusedTitleWords(title, "Sexy moment");
+  const sexyTitle = enforceSexyTone(cleanedTitle, {
     isTitle: true,
     emoji: titleEmoji,
   });
