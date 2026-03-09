@@ -4,10 +4,20 @@ const os = require("os");
 const { spawnSync } = require("child_process");
 
 const TARGET_GLOBAL_HASHTAGS = 15;
-const MAX_ITEM_HASHTAGS = 8;
+const MAX_ITEM_HASHTAGS = 12;
 const MIN_ITEM_HASHTAGS = 4;
-const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵"];
-const DESCRIPTION_EMOJIS = ["💦", "🌶", "🖤", "💞", "🔞"];
+const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵", "🍑", "👅", "🫦", "❤️‍🔥"];
+const DESCRIPTION_EMOJIS = [
+  "💦",
+  "🌶",
+  "🖤",
+  "💞",
+  "🔞",
+  "🍒",
+  "🍓",
+  "😮‍💨",
+  "🤤",
+];
 const IMAGE_EXTENSIONS = new Set([
   ".jpg",
   ".jpeg",
@@ -378,11 +388,13 @@ async function callVisionModel({
     "- description: only English, 1-2 sentences, up to 220 chars, sexual tone",
     "- emoji are allowed and recommended in title/description",
     "- hashtags: generate 8-12 tags for THIS media only (not one common set for all files)",
-    "- hashtags must be sexualized and relevant to visible details in this media",
-    "- include at least 3 specific tags that may NOT fit other media files",
+    "- each hashtag MUST map to visible details in this exact media (body parts, clothes, poses, scene, actions, camera angle, mood)",
+    "- do NOT output generic, broad, or unrelated tags; every tag must be directly justified by what is visible in this file",
+    "- sexual and explicit themes in hashtags are allowed when they match the media",
+    "- include at least 4 specific tags that likely do NOT fit other files",
     "- avoid neutral tags: holiday, music, style, photo, model, art",
-    `- use tags only from allowed list: ${allowedTags
-      .slice(0, 120)
+    `- use hashtags ONLY from this allowed list: ${allowedTags
+      .slice(0, 300)
       .join(", ")}`,
     "- vip: boolean true/false",
     "- for images: vip=true if content is highly nude/pornographic, else false",
@@ -478,7 +490,7 @@ async function callVisionModel({
   const durationVip =
     mediaType === "video" &&
     Number.isFinite(videoDurationSeconds) &&
-    videoDurationSeconds > 60;
+    videoDurationSeconds >= 120;
   const explicitTagHit = hashtags.some((tag) =>
     EXPLICIT_VIP_KEYWORDS.test(tag)
   );
@@ -617,7 +629,7 @@ async function buildConfig(env) {
       const durationVip =
         mediaType === "video" &&
         Number.isFinite(videoDurationSeconds) &&
-        videoDurationSeconds > 60;
+        videoDurationSeconds >= 120;
       ai = {
         title: path.parse(file).name,
         description: `Media file ${file}`,

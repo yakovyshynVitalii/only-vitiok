@@ -14,6 +14,7 @@ function getEnv() {
       process.env.MEDIA_CONFIG_PATH || "./media-config.json"
     ),
     HEADLESS: String(process.env.HEADLESS || "false").toLowerCase() === "true",
+    ACTION_DELAY_MS: Number(process.env.UPLOAD_ACTION_DELAY_MS || 550),
   };
 }
 
@@ -59,8 +60,39 @@ function isFileInputDetachTimeout(err) {
   const message = String((err && err.message) || "");
   return (
     message.includes("locator.waitFor: Timeout 60000ms exceeded.") &&
-    message.includes("waiting for locator('input[type=\"file\"]') to be detached")
+    message.includes(
+      "waiting for locator('input[type=\"file\"]') to be detached"
+    )
   );
+}
+
+function notifyUploadFinished() {
+  if (!process.stdout.isTTY) return;
+  process.stdout.write("\x07");
+  setTimeout(() => process.stdout.write("\x07"), 180);
+  setTimeout(() => process.stdout.write("\x07"), 360);
+}
+
+function deleteUploadedFilesIfComplete(config) {
+  const allUploaded =
+    Array.isArray(config.items) &&
+    config.items.length > 0 &&
+    config.items.every((item) => item.uploaded);
+  if (!allUploaded) return 0;
+
+  let deleted = 0;
+  for (const item of config.items) {
+    const filePath = item.filePath;
+    if (!filePath || !fs.existsSync(filePath)) continue;
+
+    try {
+      fs.unlinkSync(filePath);
+      deleted += 1;
+    } catch (err) {
+      console.log(`⚠️  Не вдалося видалити файл: ${filePath} (${err.message})`);
+    }
+  }
+  return deleted;
 }
 
 async function fillFieldIfExists(page, selectors, value) {
@@ -197,6 +229,40 @@ async function clickDoneButton(page) {
   }
 }
 
+async function openUploadModal(page) {
+  const openButtons = [
+    "button:has(.i-majesticons\\:plus-line)",
+    'button:has-text("Add"), button:has-text("Додати"), button:has-text("Upload")',
+  ];
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    for (const selector of openButtons) {
+      const button = page.locator(selector).first();
+      if ((await button.count()) === 0) continue;
+
+      try {
+        await button.waitFor({ state: "visible", timeout: 7000 });
+        await button.scrollIntoViewIfNeeded().catch(() => {});
+        await button.click({ timeout: 5000 });
+        break;
+      } catch {}
+    }
+
+    const fileInput = page.locator('input[type="file"]');
+    const appeared = await fileInput
+      .waitFor({ state: "attached", timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+
+    if (appeared) return;
+
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(700);
+  }
+
+  throw new Error("Не вдалося відкрити модалку завантаження (file input не з'явився).");
+}
+
 async function runUploadOnce() {
   loadDotEnv();
   const env = getEnv();
@@ -206,10 +272,18 @@ async function runUploadOnce() {
 
   if (!pendingItems.length) {
     console.log("✅ Усі файли в конфізі вже завантажені");
+    const deleted = deleteUploadedFilesIfComplete(config);
+    if (deleted > 0) {
+      console.log(`🧹 Видалено файлів після повного успішного аплоаду: ${deleted}`);
+    }
+    notifyUploadFinished();
     return { retryRequested: false };
   }
 
-  const browser = await chromium.launch({ headless: env.HEADLESS });
+  const browser = await chromium.launch({
+    headless: env.HEADLESS,
+    slowMo: env.ACTION_DELAY_MS,
+  });
   const context = await browser.newContext({ storageState: "state.json" });
   const page = await context.newPage();
   let retryRequested = false;
@@ -232,8 +306,7 @@ async function runUploadOnce() {
     console.log(`\n📂 Наступний файл: ${filePath}`);
 
     try {
-      await page.locator("button:has(.i-majesticons\\:plus-line)").click();
-      await page.waitForTimeout(800);
+      await openUploadModal(page);
 
       const fileInput = page.locator('input[type="file"]');
       await fileInput.setInputFiles(filePath);
@@ -252,8 +325,7 @@ async function runUploadOnce() {
       delete item.error;
       writeConfig(config, env);
 
-      fs.unlinkSync(filePath);
-      console.log(`✅ Завантажено і видалено: ${filePath}`);
+      console.log(`✅ Завантажено: ${filePath}`);
 
       await page.waitForTimeout(5000);
     } catch (err) {
@@ -269,6 +341,7 @@ async function runUploadOnce() {
           "⏳ Отримано таймаут detach для file input. Перезапущу upload через 60 секунд."
         );
       }
+
       break;
     }
   }
@@ -280,6 +353,16 @@ async function runUploadOnce() {
 
   if (lastErrorMessage) {
     throw new Error(lastErrorMessage);
+  }
+
+  const finalConfig = readConfig(env);
+  const deleted = deleteUploadedFilesIfComplete(finalConfig);
+  if (deleted > 0) {
+    console.log(`🧹 Видалено файлів після повного успішного аплоаду: ${deleted}`);
+  }
+  if (finalConfig.items.every((item) => item.uploaded)) {
+    console.log("✅ Усі файли в конфізі вже завантажені");
+    notifyUploadFinished();
   }
 
   return { retryRequested: false };
