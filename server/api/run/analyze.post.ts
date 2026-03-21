@@ -1,4 +1,7 @@
+import path from "node:path";
+import { importProjectRootMediaFiles } from "~/server/utils/media-files";
 import { readSettings } from "~/server/utils/settings";
+import { ensureMediaFolder } from "~/server/utils/settings";
 import { runScriptTask } from "~/server/utils/process-runner";
 import {
   startOllamaServe,
@@ -15,10 +18,20 @@ function parseBool(value: string, fallback = false): boolean {
 
 export default defineEventHandler(async () => {
   const settings = readSettings();
+  const mediaFolder = ensureMediaFolder(settings);
+  const importedFromRoot = importProjectRootMediaFiles(settings, mediaFolder);
   const autoUpload = parseBool(settings.env.AUTO_UPLOAD_AFTER_ANALYZE, false);
   const ollamaUrl = settings.env.OLLAMA_URL || "http://127.0.0.1:11434";
   const ollamaModel = settings.env.OLLAMA_MODEL || "qwen2.5vl:3b-q4_K_M";
   const runtimeLogs: string[] = [];
+
+  if (importedFromRoot.imported.length) {
+    runtimeLogs.push(
+      `Imported ${importedFromRoot.imported.length} media file(s) from project root to ${
+        path.relative(process.cwd(), mediaFolder) || "."
+      }.`
+    );
+  }
 
   const session = await startOllamaServe(ollamaUrl);
   runtimeLogs.push(...session.logs);
