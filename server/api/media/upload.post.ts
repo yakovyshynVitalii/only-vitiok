@@ -22,7 +22,7 @@ interface ConfigItem {
 }
 
 function sanitizeFileName(fileName: string): string {
-  const normalized = path.basename(fileName).replace(/[^\w.\-]+/g, "_");
+  const normalized = path.basename(fileName).replace(/[^\w.-]+/g, "_");
   return normalized || `media-${Date.now()}`;
 }
 

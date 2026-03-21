@@ -14,8 +14,12 @@ vi.mock("~/server/utils/settings", () => ({
 }));
 
 const tempDirs: string[] = [];
+const originalCwd = process.cwd();
 
 afterEach(() => {
+  process.chdir(originalCwd);
+  vi.resetModules();
+
   while (tempDirs.length) {
     removeDir(tempDirs.pop() as string);
   }
@@ -42,5 +46,30 @@ describe("GET /api/media", () => {
     expect(result.files).toEqual(["a.jpg", "b.mp4"]);
     expect(result.count).toBe(2);
     expect(result.relativeMediaFolder).toBe(path.relative(process.cwd(), mediaDir));
+  });
+
+  test("imports media files from project root into MEDIA_FOLDER when enabled", async () => {
+    const tmp = makeTempDir();
+    tempDirs.push(tmp);
+    process.chdir(tmp);
+
+    const mediaDir = path.join(tmp, "media");
+    fs.mkdirSync(mediaDir, { recursive: true });
+    fs.writeFileSync(path.join(tmp, "in-root.mp4"), "video");
+    fs.writeFileSync(path.join(tmp, "ignore.txt"), "text");
+
+    mocks.readSettings.mockReturnValue({
+      env: {
+        MEDIA_IMPORT_PROJECT_ROOT: "true",
+      },
+    });
+    mocks.ensureMediaFolder.mockReturnValue(mediaDir);
+
+    const handler = (await import("../../server/api/media.get")).default;
+    const event = {} as Parameters<typeof handler>[0];
+    const result = handler(event);
+
+    expect(result.files).toEqual(["in-root.mp4"]);
+    expect(fs.existsSync(path.join(mediaDir, "in-root.mp4"))).toBe(true);
   });
 });
