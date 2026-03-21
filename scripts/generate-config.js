@@ -2,74 +2,293 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { spawnSync } = require("child_process");
+const googleTrends = (() => { try { return require("google-trends-api"); } catch { return null; } })();
 
 const TARGET_GLOBAL_HASHTAGS = 15;
 const MAX_ITEM_HASHTAGS = 12;
-const VIDEO_ANALYSIS_FRAME_COUNT = 6;
+const VIDEO_ANALYSIS_FRAME_COUNT = 1;
 const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵", "🍑", "👅", "🫦", "❤️‍🔥"];
 const DESCRIPTION_EMOJIS = [
-  "💦",
-  "🌶",
-  "🖤",
-  "💞",
-  "🔞",
-  "🍒",
-  "🍓",
-  "😮‍💨",
-  "🤤",
+  "💦", "🌶", "🖤", "💞", "🔞", "🍒", "🍓", "😮‍💨", "🤤",
 ];
 const IMAGE_EXTENSIONS = new Set([
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".webp",
-  ".gif",
-  ".bmp",
+  ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp",
 ]);
 const VIDEO_EXTENSIONS = new Set([
-  ".mp4",
-  ".mov",
-  ".webm",
-  ".mkv",
-  ".avi",
-  ".m4v",
+  ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v",
 ]);
-const DEFAULT_SEXY_TAGS = [
-  "sexy",
-  "sensual",
-  "lingerie",
-  "erotic",
-  "seductive",
-  "intimate",
-  "alluring",
-  "provocative",
-  "adult",
-  "glamour",
-  "tempting",
-  "passion",
-  "romantic",
-  "nightwear",
-  "bodysuit",
-  "boobs",
-  "ass",
-  "blowjob",
-  "strapon",
-  "oral",
-  "hardcore",
-  "nsfw",
-  "fetish",
-  "nude",
-  "pussy",
-  "sex",
-  "twogirl",
-  "lesbian",
-  "milf",
-  "dildo",
+
+// Noise words to filter out from scraped trends
+const NOISE_TERMS = new Set([
+  "sign up", "resend", "privacy policy", "cookie use", "contact support",
+  "privacy statement", "discover videos", "straight", "gay", "transgender",
+  "discover pornstars", "verified amateurs", "pornstars", "male actors",
+  "most popular", "most viewed", "top trending", "hot", "sex", "porn",
+  "dick", "tits", "ass", "pussy", "boobs", // too generic as standalone trends
+  "teen", "teens", "hentai", "cartoon", "anime", // not our niche
+  "seks", "retro", "vintage", "celebrity", // irrelevant
+  "mom", "granny", "old young", // not matching our content type
+]);
+
+// Minimal fallback — used ONLY when ALL internet sources fail
+const FALLBACK_TREND_TERMS = [
+  "onlyfans", "milf", "amateur", "pov", "anal", "big ass", "big tits",
+  "latina", "threesome", "lesbian", "squirt", "creampie", "blowjob",
+  "deepthroat", "cowgirl", "bdsm", "close up", "wet pussy", "orgasm",
 ];
-const EXPLICIT_VIP_KEYWORDS =
-  /(blowjob|strapon|hardcore|nsfw|nude|pussy|explicit|penetration|oral sex|anal|boobs|ass)/i;
-let wdTaggerClientPromise = null;
-let gradioModulePromise = null;
+
+let trendingTermsCache = null;
+
+const DEFAULT_SEXY_TAGS = [
+  "sexy", "sensual", "lingerie", "erotic", "seductive", "intimate",
+  "alluring", "provocative", "adult", "glamour", "tempting", "passion",
+  "romantic", "nightwear", "bodysuit", "boobs", "ass", "blowjob",
+  "strapon", "oral", "hardcore", "nsfw", "fetish", "nude", "pussy",
+  "sex", "twogirl", "lesbian", "milf", "dildo",
+];
+
+/* ------------------------------------------------------------------ */
+/*  Live trend fetching from search engines & adult sites               */
+/* ------------------------------------------------------------------ */
+
+async function fetchWithUA(url, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+    });
+    return resp;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function extractTermsFromHTML(html) {
+  const terms = new Map(); // term -> frequency
+
+  // Category links: /categories/some-term
+  for (const m of html.matchAll(/\/categories\/([a-z][a-z0-9-]{2,30})/g)) {
+    const term = m[1].replace(/-/g, " ").trim();
+    if (term.length >= 3) terms.set(term, (terms.get(term) || 0) + 1);
+  }
+
+  // Tag links: /tags/some-term
+  for (const m of html.matchAll(/\/tags\/([a-z][a-z0-9-]{2,30})/g)) {
+    const term = m[1].replace(/-/g, " ").trim();
+    if (term.length >= 3) terms.set(term, (terms.get(term) || 0) + 1);
+  }
+
+  // Search queries in URLs
+  for (const m of html.matchAll(/search[=\/]([a-zA-Z+%20]{3,30})/g)) {
+    try {
+      const term = decodeURIComponent(m[1].replace(/\+/g, " ")).toLowerCase().trim();
+      if (term.length >= 3 && /^[a-z\s]+$/.test(term)) terms.set(term, (terms.get(term) || 0) + 1);
+    } catch {}
+  }
+
+  return terms;
+}
+
+function cleanTrendTerms(termsMap) {
+  const cleaned = [];
+  // Known pornstar name patterns to filter
+  const pornstarNames = /^(aj applegate|sonya blaze|eva soda|sweetie fox|kira noir|cory chase|martina smeraldi|claudia bavel|flexy lover|darko mur|arisha mills|public agent|bratty sis|farfalla)/i;
+  for (const [term, count] of termsMap.entries()) {
+    const t = term.toLowerCase().trim();
+    if (t.length < 3 || t.length > 30) continue;
+    if (NOISE_TERMS.has(t)) continue;
+    if (!/^[a-z\s]+$/.test(t)) continue;
+    if (t.split(" ").length > 4) continue;
+    if (pornstarNames.test(t)) continue;
+    // Filter single-char or very short meaningless terms
+    if (t.length <= 3 && t.split(" ").length === 1) continue;
+    cleaned.push({ term: t, score: count });
+  }
+  return cleaned;
+}
+
+async function scrapeXhamsterTrends() {
+  const allTerms = new Map();
+  const urls = [
+    "https://xhamster.com/categories",
+    "https://xhamster.com/best/monthly",
+  ];
+
+  for (const url of urls) {
+    try {
+      const resp = await fetchWithUA(url);
+      const html = await resp.text();
+      const terms = extractTermsFromHTML(html);
+      for (const [term, count] of terms) {
+        allTerms.set(term, (allTerms.get(term) || 0) + count);
+      }
+    } catch {}
+  }
+
+  return cleanTrendTerms(allTerms);
+}
+
+async function scrapePornhubTrends() {
+  const allTerms = new Map();
+  const urls = [
+    "https://www.pornhub.com/categories",
+    "https://www.pornhub.com/video?o=tr",
+    "https://www.pornhub.com/video?o=mv&t=w",
+  ];
+
+  for (const url of urls) {
+    try {
+      const resp = await fetchWithUA(url);
+      const html = await resp.text();
+      const terms = extractTermsFromHTML(html);
+      for (const [term, count] of terms) {
+        allTerms.set(term, (allTerms.get(term) || 0) + count);
+      }
+    } catch {}
+  }
+
+  return cleanTrendTerms(allTerms);
+}
+
+async function fetchGoogleTrendsData() {
+  if (!googleTrends) return [];
+
+  const results = [];
+  const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const batches = [
+    ["onlyfans", "milf", "amateur", "pov", "anal"],
+    ["lesbian", "threesome", "blowjob", "creampie", "squirt"],
+    ["latina", "asian", "ebony", "redhead", "stepmom"],
+  ];
+
+  for (const batch of batches) {
+    try {
+      const raw = await Promise.race([
+        googleTrends.interestOverTime({
+          keyword: batch, startTime: oneWeekAgo, geo: "US",
+        }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000)),
+      ]);
+      const data = JSON.parse(raw);
+      const timeline = data?.default?.timelineData || [];
+      if (timeline.length > 0) {
+        const last = timeline[timeline.length - 1];
+        batch.forEach((kw, idx) => {
+          const score = Number(last.value?.[idx] || 0);
+          if (score > 0) results.push({ term: kw, score });
+        });
+      }
+    } catch {}
+  }
+
+  // Fetch related queries for top terms
+  const topTerms = results.sort((a, b) => b.score - a.score).slice(0, 3);
+  for (const { term } of topTerms) {
+    try {
+      const raw = await Promise.race([
+        googleTrends.relatedQueries({
+          keyword: term, startTime: oneWeekAgo, geo: "US",
+        }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000)),
+      ]);
+      const relData = JSON.parse(raw);
+      const rising = relData?.default?.rankedList?.[1]?.rankedKeyword || [];
+      const top = relData?.default?.rankedList?.[0]?.rankedKeyword || [];
+      for (const item of [...rising.slice(0, 5), ...top.slice(0, 5)]) {
+        const query = String(item.query || "").toLowerCase().trim();
+        if (query && query.split(" ").length <= 3 && /^[a-z\s]+$/.test(query)) {
+          results.push({ term: query, score: Number(item.value || 30) });
+        }
+      }
+    } catch {}
+  }
+
+  return results;
+}
+
+async function fetchRealTrends() {
+  if (trendingTermsCache !== null) return trendingTermsCache;
+
+  console.log("📡 Fetching real trends from search engines & adult sites...");
+  const combinedMap = new Map();
+  let sourceCount = 0;
+
+  // Source 1: xHamster (categories + best monthly)
+  try {
+    const xhTerms = await scrapeXhamsterTrends();
+    if (xhTerms.length > 0) {
+      sourceCount++;
+      console.log(`   ✅ xHamster: ${xhTerms.length} trending terms`);
+      for (const { term, score } of xhTerms) {
+        combinedMap.set(term, (combinedMap.get(term) || 0) + score * 2); // weight x2
+      }
+    }
+  } catch (e) {
+    console.log(`   ❌ xHamster failed: ${e.message}`);
+  }
+
+  // Source 2: Pornhub (categories + trending + most viewed)
+  try {
+    const phTerms = await scrapePornhubTrends();
+    if (phTerms.length > 0) {
+      sourceCount++;
+      console.log(`   ✅ Pornhub: ${phTerms.length} trending terms`);
+      for (const { term, score } of phTerms) {
+        combinedMap.set(term, (combinedMap.get(term) || 0) + score * 2);
+      }
+    }
+  } catch (e) {
+    console.log(`   ❌ Pornhub failed: ${e.message}`);
+  }
+
+  // Source 3: Google Trends (if available)
+  try {
+    const gtTerms = await fetchGoogleTrendsData();
+    if (gtTerms.length > 0) {
+      sourceCount++;
+      console.log(`   ✅ Google Trends: ${gtTerms.length} data points`);
+      for (const { term, score } of gtTerms) {
+        combinedMap.set(term, (combinedMap.get(term) || 0) + score);
+      }
+    }
+  } catch (e) {
+    console.log(`   ❌ Google Trends failed: ${e.message}`);
+  }
+
+  // Sort by combined score, take top 60
+  const sorted = [...combinedMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 60);
+
+  if (sorted.length < 10) {
+    console.log(`   ⚠️  Only ${sorted.length} terms from live sources, using fallback`);
+    for (const term of FALLBACK_TREND_TERMS) {
+      if (!combinedMap.has(term)) {
+        sorted.push([term, 1]);
+      }
+    }
+  }
+
+  const terms = sorted.map(([term]) => term);
+  const scoreMap = Object.fromEntries(sorted);
+
+  console.log(`📈 Total: ${terms.length} trending terms from ${sourceCount} live source(s)`);
+  console.log(`   Top 10: ${terms.slice(0, 10).join(", ")}`);
+
+  trendingTermsCache = { terms, scoreMap };
+  return trendingTermsCache;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Environment                                                        */
+/* ------------------------------------------------------------------ */
 
 function getEnv() {
   const parsedConcurrency = Number(process.env.AI_ANALYSIS_CONCURRENCY || 3);
@@ -88,17 +307,7 @@ function getEnv() {
 
   return {
     OLLAMA_URL: ollamaUrl,
-    OLLAMA_MODEL: process.env.OLLAMA_MODEL || "llava:13b",
-    WD_TAGGER_SPACE: process.env.WD_TAGGER_SPACE || "SmilingWolf/wd-tagger",
-    WD_TAGGER_MODEL_REPO:
-      process.env.WD_TAGGER_MODEL_REPO || "SmilingWolf/wd-swinv2-tagger-v3",
-    WD_TAGGER_GENERAL_THRESHOLD: Number(
-      process.env.WD_TAGGER_GENERAL_THRESHOLD || 0.35
-    ),
-    WD_TAGGER_CHARACTER_THRESHOLD: Number(
-      process.env.WD_TAGGER_CHARACTER_THRESHOLD || 0.85
-    ),
-    HF_TOKEN: String(process.env.HF_TOKEN || "").trim(),
+    OLLAMA_MODEL: process.env.OLLAMA_MODEL || "qwen2.5vl:7b",
     AI_ANALYSIS_CONCURRENCY: aiConcurrency,
     MODEL_RETRY_COUNT: modelRetryCount,
     MEDIA_FOLDER: path.resolve(process.env.MEDIA_FOLDER || "./media"),
@@ -111,16 +320,23 @@ function getEnv() {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Utility functions                                                   */
+/* ------------------------------------------------------------------ */
+
 function isLowQualityModelOutput({ title, description, hashtags, filename }) {
   const normalizedTitle = String(title || "").trim().toLowerCase();
   const normalizedDescription = String(description || "").trim().toLowerCase();
   const normalizedFile = String(filename || "").trim().toLowerCase();
+  const baseName = path.parse(normalizedFile).name;
   const tags = Array.isArray(hashtags) ? hashtags : [];
 
   if (!normalizedTitle || !normalizedDescription) return true;
   if (tags.length === 0) return true;
   if (normalizedTitle === normalizedFile) return true;
-  if (normalizedTitle === path.parse(normalizedFile).name) return true;
+  if (normalizedTitle === baseName) return true;
+  const fileWords = baseName.split(/[\s_\-]+/).filter((w) => w.length > 8);
+  if (fileWords.some((word) => normalizedTitle.includes(word))) return true;
   if (normalizedDescription.startsWith("sexy media content")) return true;
 
   return false;
@@ -180,14 +396,6 @@ function loadAllowedTags(filePath) {
   return unique;
 }
 
-function filterModelTags(tags, allowedTagSet) {
-  const filtered = (tags || [])
-    .map(normalizeHashtag)
-    .filter((tag) => tag && tag.length >= 3 && allowedTagSet.has(tag));
-
-  return [...new Set(filtered)];
-}
-
 function normalizeItemTags(tags) {
   const ownTags = [
     ...new Set((tags || []).map(normalizeHashtag).filter(Boolean)),
@@ -210,6 +418,12 @@ function sanitizeEnglishText(value, fallback = "") {
 function removeOverusedTitleWords(title, fallback = "Sexy moment") {
   const cleaned = String(title || "")
     .replace(/\bsensual\b/gi, " ")
+    .replace(/\bsolo\b/gi, " ")
+    .replace(/\bvideo\b/gi, " ")
+    .replace(/\bcontent\b/gi, " ")
+    .replace(/\bclip\b/gi, " ")
+    .replace(/\bmedia\b/gi, " ")
+    .replace(/\bfootage\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -296,6 +510,10 @@ function parseJsonFromText(text) {
   throw new Error(`Could not parse model JSON response: ${raw}`);
 }
 
+/* ------------------------------------------------------------------ */
+/*  FFmpeg / media helpers                                              */
+/* ------------------------------------------------------------------ */
+
 function hasFfmpeg() {
   const check = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
   return check.status === 0;
@@ -311,7 +529,7 @@ function hasSips() {
   return check.status === 0;
 }
 
-function createResizedImageForAi(imagePath, maxSize = 1024) {
+function createResizedImageForAi(imagePath, maxSize = 512) {
   if (!hasSips()) return null;
 
   const tempFile = path.join(
@@ -322,14 +540,10 @@ function createResizedImageForAi(imagePath, maxSize = 1024) {
   const run = spawnSync(
     "sips",
     [
-      "-s",
-      "format",
-      "jpeg",
-      "-Z",
-      String(maxSize),
+      "-s", "format", "jpeg",
+      "-Z", String(maxSize),
       imagePath,
-      "--out",
-      tempFile,
+      "--out", tempFile,
     ],
     { stdio: "ignore" }
   );
@@ -344,12 +558,9 @@ function getVideoDurationSeconds(videoPath) {
   const run = spawnSync(
     "ffprobe",
     [
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
       videoPath,
     ],
     { encoding: "utf8" }
@@ -364,7 +575,7 @@ function buildVideoFrameTimestamps(
   durationSeconds,
   frameCount = VIDEO_ANALYSIS_FRAME_COUNT
 ) {
-  const safeCount = Math.max(1, Math.min(10, Math.round(frameCount || 5)));
+  const safeCount = Math.max(1, Math.min(10, Math.round(frameCount || 4)));
 
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
     return Array.from({ length: safeCount }, (_, i) => 0.5 + i * 1.0);
@@ -402,12 +613,11 @@ function extractVideoFrames(
       "ffmpeg",
       [
         "-y",
-        "-ss",
-        String(timestamp),
-        "-i",
-        videoPath,
-        "-vframes",
-        "1",
+        "-ss", String(timestamp),
+        "-i", videoPath,
+        "-vframes", "1",
+        "-vf", "scale='min(512,iw)':'min(512,ih)':force_original_aspect_ratio=decrease",
+        "-q:v", "2",
         tempFile,
       ],
       { stdio: "ignore" }
@@ -421,246 +631,89 @@ function extractVideoFrames(
   return frames;
 }
 
-function toHumanTag(tag) {
-  return String(tag || "")
-    .replace(/_/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+/* ------------------------------------------------------------------ */
+/*  Ollama Vision Analysis — the core                                   */
+/* ------------------------------------------------------------------ */
 
-function titleFromTags(tags, fileName) {
-  const fallback = sanitizeEnglishText(path.parse(fileName).name, "Media Content");
-  if (!tags.length) return fallback;
-
-  const parts = tags
-    .slice(0, 3)
-    .map(toHumanTag)
-    .filter(Boolean)
-    .map((text) => text.charAt(0).toUpperCase() + text.slice(1));
-
-  return sanitizeEnglishText(parts.join(" • "), fallback);
-}
-
-function descriptionFromTags(tags, fileName) {
-  const fallback = `Highlights: ${sanitizeEnglishText(fileName, "media content")}.`;
-  if (!tags.length) return fallback;
-
-  const preview = tags.slice(0, 8).map(toHumanTag).filter(Boolean).join(", ");
-  return sanitizeEnglishText(`Highlights: ${preview}.`, fallback);
-}
-
-async function getGradioModule() {
-  if (!gradioModulePromise) {
-    gradioModulePromise = import("@gradio/client");
-  }
-  return gradioModulePromise;
-}
-
-async function getWdTaggerClient(env) {
-  if (!wdTaggerClientPromise) {
-    wdTaggerClientPromise = (async () => {
-      const { Client } = await getGradioModule();
-      const options = env.HF_TOKEN ? { token: env.HF_TOKEN } : undefined;
-      return Client.connect(env.WD_TAGGER_SPACE, options);
-    })();
-  }
-
-  try {
-    return await wdTaggerClientPromise;
-  } catch (error) {
-    wdTaggerClientPromise = null;
-    throw error;
-  }
-}
-
-function asConfidenceMap(value) {
-  if (!value || typeof value !== "object") return {};
-  const out = {};
-
-  for (const [key, score] of Object.entries(value)) {
-    const normalized = normalizeHashtag(key);
-    if (!normalized) continue;
-    const numeric = Number(score);
-    if (!Number.isFinite(numeric)) continue;
-    out[normalized] = numeric;
-  }
-
-  return out;
-}
-
-async function runWdTaggerPredict(imagePath, env) {
-  const app = await getWdTaggerClient(env);
-  const { handle_file } = await getGradioModule();
-
-  let response;
-  try {
-    response = await app.predict("/predict", {
-      image: handle_file(imagePath),
-      model_repo: env.WD_TAGGER_MODEL_REPO,
-      general_thresh: env.WD_TAGGER_GENERAL_THRESHOLD,
-      general_mcut_enabled: false,
-      character_thresh: env.WD_TAGGER_CHARACTER_THRESHOLD,
-      character_mcut_enabled: false,
-    });
-  } catch {
-    response = await app.predict("/predict", [
-      handle_file(imagePath),
-      env.WD_TAGGER_MODEL_REPO,
-      env.WD_TAGGER_GENERAL_THRESHOLD,
-      false,
-      env.WD_TAGGER_CHARACTER_THRESHOLD,
-      false,
-    ]);
-  }
-
-  const data = Array.isArray(response?.data) ? response.data : [];
-  const rating = asConfidenceMap(data[1]);
-  const general = asConfidenceMap(data[3]);
-  const textTags = String(data[0] || "")
-    .split(",")
-    .map((tag) => normalizeHashtag(tag))
-    .filter(Boolean);
-
-  if (!Object.keys(general).length && textTags.length) {
-    for (const tag of textTags) {
-      general[tag] = 1;
-    }
-  }
-
-  return {
-    rating,
-    general,
-  };
-}
-
-async function callWdTaggerModel({
+async function analyzeWithVision({
   filePath,
   mediaType,
   env,
   videoDurationSeconds,
   allowedTags,
+  trendingTerms,
 }) {
   const filename = path.basename(filePath);
-  const allowedTagSet = new Set(allowedTags);
-  const framePaths =
-    mediaType === "video"
-      ? extractVideoFrames(
-          filePath,
-          videoDurationSeconds,
-          VIDEO_ANALYSIS_FRAME_COUNT
-        )
-      : [filePath];
+
+  // Extract frames (video) or prepare image
+  let framePaths = [];
+  const tempFiles = [];
+
+  if (mediaType === "video") {
+    framePaths = extractVideoFrames(
+      filePath,
+      videoDurationSeconds,
+      VIDEO_ANALYSIS_FRAME_COUNT
+    );
+    tempFiles.push(...framePaths);
+  } else {
+    const resized = createResizedImageForAi(filePath);
+    if (resized) {
+      framePaths = [resized];
+      tempFiles.push(resized);
+    } else {
+      framePaths = [filePath];
+    }
+  }
 
   if (!framePaths.length) {
-    throw new Error("No frames extracted for WD Tagger");
+    throw new Error("No frames available for vision analysis");
   }
 
-  const scoreMap = new Map();
-  const ratingMap = new Map();
+  // Convert to base64 for Ollama vision API
+  const base64Images = framePaths.map((fp) => toBase64(fp));
 
-  try {
-    for (const framePath of framePaths) {
-      const result = await runWdTaggerPredict(framePath, env);
-      for (const [tag, score] of Object.entries(result.general)) {
-        const previous = scoreMap.get(tag) || 0;
-        scoreMap.set(tag, Math.max(previous, Number(score)));
-      }
-      for (const [tag, score] of Object.entries(result.rating)) {
-        const previous = ratingMap.get(tag) || 0;
-        ratingMap.set(tag, Math.max(previous, Number(score)));
-      }
-    }
-  } finally {
-    for (const framePath of framePaths) {
-      if (framePath === filePath) continue;
-      try {
-        fs.unlinkSync(framePath);
-      } catch {}
-    }
+  // Cleanup temp files immediately
+  for (const fp of tempFiles) {
+    try { fs.unlinkSync(fp); } catch {}
   }
 
-  const sortedTags = [...scoreMap.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([tag]) => tag);
-
-  let hashtags = sortedTags.filter((tag) => allowedTagSet.has(tag));
-  if (!hashtags.length) {
-    hashtags = sortedTags;
-  }
-  hashtags = normalizeTags(hashtags);
-
-  const explicitRating = Math.max(
-    Number(ratingMap.get("explicit") || 0),
-    Number(ratingMap.get("questionable") || 0)
-  );
-  return {
-    hashtags,
-    explicitRating,
-    videoDurationSeconds: Number.isFinite(videoDurationSeconds)
-      ? Math.round(videoDurationSeconds)
-      : null,
-  };
-}
-
-async function callKeywordModel({
-  filePath,
-  mediaType,
-  env,
-  videoDurationSeconds,
-  allowedTags,
-  keywords,
-  explicitRating,
-}) {
-  const filename = path.basename(filePath);
-  const keywordList = normalizeTags(keywords || []);
-  if (!keywordList.length) {
-    throw new Error("WD Tagger returned no keywords");
-  }
-
-  const durationLine =
+  const allowedTagsList = allowedTags.join(", ");
+  const trendTermsList = (trendingTerms || []).join(", ");
+  const durationInfo =
     mediaType === "video" && Number.isFinite(videoDurationSeconds)
-      ? `Video duration seconds: ${Math.round(videoDurationSeconds)}.`
+      ? `\nVideo duration: ${Math.round(videoDurationSeconds)} seconds.`
       : "";
-  const allowedTagSet = new Set(allowedTags);
 
-  const prompt = [
-    `File: ${filename}. Media type: ${mediaType}.`,
-    durationLine,
-    `Keywords from WD Tagger: ${keywordList.slice(0, 80).join(", ")}.`,
-    "You are a content editor for a media platform. Build metadata using only these keywords and file context.",
-    "Return JSON only (no markdown):",
-    '{"title":"...","description":"...","hashtags":["keyword1","keyword2"]}',
-    "Rules:",
-    "- title: only English, short, up to 60 chars, sexual tone",
-    "- description: only English, 1-2 sentences, up to 220 chars, sexual tone",
-    "- emoji are allowed and recommended in title/description",
-    "- hashtags: 5-12 tags for THIS media",
-    "- each hashtag MUST be selected from WD Tagger keywords above",
-    "- do not invent tags outside WD Tagger keywords",
-    "- prioritize specific keywords over generic ones",
-    `- use hashtags ONLY from this allowed list: ${allowedTags
-      .slice(0, 300)
-      .join(", ")}`,
-    "- do not use placeholder tags like tag, tag1, tag2",
-    "- no extra text outside JSON",
-  ].join("\n");
+  const prompt = `Adult content SEO analyst. Analyze this ${mediaType} frame.${durationInfo}
+
+Describe what you SEE: body parts, actions, nudity level, setting.
+"vip"=true ONLY if naked pussy/vagina is CLEARLY visible and uncovered. Strict: when in doubt, false.
+
+Title (max 60 chars): specific action/body focus, 1 emoji at end, English. NO filename "${filename}", NO generic words (sexy/hot/video/content).
+Description (max 200 chars): enticing, specific, 1 emoji, English.
+Hashtags: pick 5-12 ONLY from: ${allowedTagsList}
+Trending terms from adult sites: ${trendTermsList}
+Pick 1-5 matching terms. Rate relevance 0-100.
+
+JSON only:
+{"title":"...","description":"...","hashtags":[],"vip":false,"trendTerms":[],"trendScore":0,"contentSummary":"what you see"}`;
 
   let response;
   try {
     response = await fetch(`${env.OLLAMA_URL}/api/chat`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: env.OLLAMA_MODEL,
         format: "json",
         stream: false,
-        options: { temperature: 0.4 },
+        options: { temperature: 0.4, num_predict: 512 },
         messages: [
           {
             role: "user",
             content: prompt,
+            images: base64Images,
           },
         ],
       }),
@@ -679,66 +732,67 @@ async function callKeywordModel({
   const data = await response.json();
   const parsed = parseJsonFromText(data.message?.content);
 
-  const title = sanitizeEnglishText(parsed.title, titleFromTags(keywordList, filename));
-  const description = sanitizeEnglishText(
-    parsed.description,
-    descriptionFromTags(keywordList, filename)
-  );
-
-  let hashtags = keywordList.filter((tag) => allowedTagSet.has(tag));
-  if (!hashtags.length) hashtags = keywordList;
-  hashtags = normalizeTags(hashtags).slice(0, MAX_ITEM_HASHTAGS);
-
+  // Process title
+  const rawTitle = sanitizeEnglishText(parsed.title, "");
+  const cleanedTitle = removeOverusedTitleWords(rawTitle, "");
   const titleEmoji = pickEmoji(`${filename}:title`, TITLE_EMOJIS);
-  const descriptionEmoji = pickEmoji(
-    `${filename}:description`,
-    DESCRIPTION_EMOJIS
-  );
-  const cleanedTitle = removeOverusedTitleWords(title, "Sexy moment");
-  const sexyTitle = enforceSexyTone(cleanedTitle, {
-    isTitle: true,
-    emoji: titleEmoji,
-  });
-  const sexyDescription = enforceSexyTone(description, {
-    isTitle: false,
-    emoji: descriptionEmoji,
-  });
+  const title = enforceSexyTone(cleanedTitle, { isTitle: true, emoji: titleEmoji });
 
+  // Process description
+  const rawDescription = sanitizeEnglishText(parsed.description, "");
+  const descriptionEmoji = pickEmoji(`${filename}:description`, DESCRIPTION_EMOJIS);
+  const description = enforceSexyTone(rawDescription, { isTitle: false, emoji: descriptionEmoji });
+
+  // Process hashtags — filter to allowed only
+  const allowedTagSet = new Set(allowedTags);
+  let hashtags = normalizeTags(parsed.hashtags || []).filter(
+    (tag) => allowedTagSet.has(tag)
+  );
+  if (hashtags.length < 3) {
+    // If model returned too few valid tags, keep what we got
+    const modelTags = normalizeTags(parsed.hashtags || []);
+    hashtags = [...new Set([...hashtags, ...modelTags])].slice(0, MAX_ITEM_HASHTAGS);
+  }
+  hashtags = hashtags.slice(0, MAX_ITEM_HASHTAGS);
+
+  // VIP — directly from model's vision analysis
+  const vip = Boolean(parsed.vip);
+
+  // Trend terms
+  const trendTerms = Array.isArray(parsed.trendTerms)
+    ? parsed.trendTerms.filter((t) => typeof t === "string" && t.trim()).slice(0, 5)
+    : [];
+  const trendScore = Math.max(0, Math.min(100, Math.round(Number(parsed.trendScore) || 0)));
+
+  // Content summary for logging
+  const contentSummary = String(parsed.contentSummary || "").trim();
+
+  // Quality check
   if (
-    isLowQualityModelOutput({
-      title,
-      description,
-      hashtags,
-      filename,
-    })
+    isLowQualityModelOutput({ title, description, hashtags, filename })
   ) {
-    throw new Error("Keyword model returned incomplete metadata");
+    throw new Error(
+      `Vision model returned low quality output for ${filename}`
+    );
   }
 
-  const durationVip =
-    mediaType === "video" &&
-    Number.isFinite(videoDurationSeconds) &&
-    videoDurationSeconds >= 120;
-  const explicitTagHit = hashtags.some((tag) =>
-    EXPLICIT_VIP_KEYWORDS.test(tag)
-  );
-  const explicitTextHit = EXPLICIT_VIP_KEYWORDS.test(
-    `${sexyTitle} ${sexyDescription}`
-  );
-  const imageVip =
-    Number(explicitRating || 0) >= 0.4 || explicitTagHit || explicitTextHit;
-  const vip = mediaType === "video" ? Boolean(durationVip) : imageVip;
-
   return {
-    title: sexyTitle,
-    description: sexyDescription,
+    title,
+    description,
     hashtags,
     vip,
+    trendTermsUsed: trendTerms,
+    trendScore,
+    contentSummary,
     videoDurationSeconds: Number.isFinite(videoDurationSeconds)
       ? Math.round(videoDurationSeconds)
       : null,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/*  Config building — orchestrator                                      */
+/* ------------------------------------------------------------------ */
 
 function rankGlobalHashtags(mediaItems) {
   const stats = new Map();
@@ -758,6 +812,13 @@ function rankGlobalHashtags(mediaItems) {
 async function buildConfig(env) {
   const allowedTags = loadAllowedTags(env.TAG_CATEGORIES_PATH);
   const allowedTagSet = new Set(allowedTags);
+
+  console.log(`🏷️  ${allowedTags.length} allowed tags loaded`);
+
+  // Fetch real trends from internet
+  const trendsData = await fetchRealTrends();
+  const trendingTerms = trendsData.terms;
+  console.log(`📈 ${trendingTerms.length} real trending terms loaded`);
 
   if (!fs.existsSync(env.MEDIA_FOLDER)) {
     throw new Error(`Media folder not found: ${env.MEDIA_FOLDER}`);
@@ -779,7 +840,9 @@ async function buildConfig(env) {
   let existingConfig = null;
   if (fs.existsSync(env.MEDIA_CONFIG_PATH)) {
     try {
-      existingConfig = JSON.parse(fs.readFileSync(env.MEDIA_CONFIG_PATH, "utf8"));
+      existingConfig = JSON.parse(
+        fs.readFileSync(env.MEDIA_CONFIG_PATH, "utf8")
+      );
     } catch {
       existingConfig = null;
     }
@@ -807,6 +870,10 @@ async function buildConfig(env) {
         title: String(existing.title || "").trim(),
         description: String(existing.description || "").trim(),
         hashtags: normalizeTags(existing.hashtags || []),
+        trendTermsUsed: Array.isArray(existing.trendTermsUsed)
+          ? existing.trendTermsUsed
+          : [],
+        trendScore: Number(existing.trendScore || 0),
         vip: Boolean(existing.vip),
         videoDurationSeconds: Number.isFinite(existing.videoDurationSeconds)
           ? Math.round(existing.videoDurationSeconds)
@@ -828,15 +895,19 @@ async function buildConfig(env) {
     };
   });
 
+  /* ---------- Progress tracking ---------- */
+
   const completedMap = new Array(files.length).fill(false);
-  const concurrency = env.AI_ANALYSIS_CONCURRENCY || 3;
+  const concurrency = 1; // Force sequential — vision model can't handle parallel on MacBook Air
   const total = files.length;
   const startedAt = Date.now();
   let completed = 0;
   let fallbackCount = 0;
   let lastProgressLineLength = 0;
   let spinnerIndex = 0;
-  const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const spinnerFrames = [
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+  ];
 
   function isItemAnalyzed(item) {
     return (
@@ -926,11 +997,15 @@ async function buildConfig(env) {
     return snapshot;
   }
 
+  /* ---------- Per-file analysis ---------- */
+
   async function analyzeFile(file) {
     const fullPath = path.join(env.MEDIA_FOLDER, file);
     const mediaType = detectMediaType(fullPath);
     const videoDurationSeconds =
       mediaType === "video" ? getVideoDurationSeconds(fullPath) : null;
+
+    const FILE_TIMEOUT_MS = 300000; // 5 min per file for vision model
 
     let ai;
     let usedFallback = false;
@@ -939,23 +1014,46 @@ async function buildConfig(env) {
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        const wd = await callWdTaggerModel({
-          filePath: fullPath,
-          mediaType,
-          env,
-          videoDurationSeconds,
-          allowedTags,
-        });
+        ai = await Promise.race([
+          analyzeWithVision({
+            filePath: fullPath,
+            mediaType,
+            env,
+            videoDurationSeconds,
+            allowedTags,
+            trendingTerms,
+          }),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Vision analysis timed out (3 min)")),
+              FILE_TIMEOUT_MS
+            )
+          ),
+        ]);
 
-        ai = await callKeywordModel({
-          filePath: fullPath,
-          mediaType,
-          env,
-          videoDurationSeconds,
-          allowedTags,
-          keywords: wd.hashtags,
-          explicitRating: wd.explicitRating,
-        });
+        // Log results
+        const durLabel = videoDurationSeconds
+          ? " " + formatDuration(videoDurationSeconds)
+          : "";
+        const trendTerms = ai.trendTermsUsed || [];
+        const scoreLabel =
+          ai.trendScore > 0 ? `${ai.trendScore}/100` : "n/a";
+
+        logInfo(
+          `\n🎬 ${file} (${mediaType}${durLabel})`
+        );
+        if (ai.contentSummary) {
+          logInfo(`   👁️  Saw: ${ai.contentSummary}`);
+        }
+        logInfo(`   📝 Title: ${ai.title}`);
+        logInfo(`   📄 Desc: ${ai.description}`);
+        logInfo(`   🏷️  Tags: ${(ai.hashtags || []).join(", ")}`);
+        if (trendTerms.length > 0) {
+          logInfo(
+            `   📈 Trends: ${trendTerms.join(", ")} (score: ${scoreLabel})`
+          );
+        }
+        logInfo(`   ${ai.vip ? "🔞 VIP: YES (pussy visible)" : "✅ VIP: no"}`);
 
         lastModelError = null;
         break;
@@ -963,9 +1061,7 @@ async function buildConfig(env) {
         lastModelError = err;
         if (attempt < attempts) {
           logInfo(
-            `⚠️  Analyze retry ${attempt}/${attempts - 1} for ${file}: ${
-              err.message
-            }`
+            `⚠️  Retry ${attempt}/${attempts - 1} for ${file}: ${err.message}`
           );
         }
       }
@@ -974,15 +1070,15 @@ async function buildConfig(env) {
     if (!ai) {
       usedFallback = true;
       logInfo(
-        `⚠️  Analyze failed for ${file}: ${
-          lastModelError?.message || "Unknown model error"
-        }`
+        `⚠️  Failed for ${file}: ${lastModelError?.message || "Unknown error"}`
       );
       ai = {
         title: "",
         description: "",
         hashtags: [],
         vip: false,
+        trendTermsUsed: [],
+        trendScore: 0,
         videoDurationSeconds: Number.isFinite(videoDurationSeconds)
           ? Math.round(videoDurationSeconds)
           : null,
@@ -996,6 +1092,8 @@ async function buildConfig(env) {
       title: ai.title,
       description: ai.description,
       hashtags: ai.hashtags,
+      trendTermsUsed: ai.trendTermsUsed || [],
+      trendScore: ai.trendScore || 0,
       vip: Boolean(ai.vip),
       videoDurationSeconds: ai.videoDurationSeconds,
       uploaded: false,
@@ -1003,9 +1101,9 @@ async function buildConfig(env) {
     };
   }
 
-  // Persist placeholders so UI can render cards immediately.
-  persistConfigSnapshot();
+  /* ---------- Run workers ---------- */
 
+  persistConfigSnapshot();
   renderProgress();
 
   let nextIndex = 0;
@@ -1022,6 +1120,7 @@ async function buildConfig(env) {
         renderProgress();
         continue;
       }
+      logInfo(`\u23f3 Analyzing ${file}...`);
       const result = await analyzeFile(file);
 
       const current = items[index];
@@ -1029,6 +1128,8 @@ async function buildConfig(env) {
       current.title = result.title;
       current.description = result.description;
       current.hashtags = result.hashtags;
+      current.trendTermsUsed = result.trendTermsUsed || [];
+      current.trendScore = result.trendScore || 0;
       current.vip = Boolean(result.vip);
       current.videoDurationSeconds = result.videoDurationSeconds;
       current.uploaded = false;
@@ -1047,19 +1148,32 @@ async function buildConfig(env) {
   return persistConfigSnapshot();
 }
 
+/* ------------------------------------------------------------------ */
+/*  Main                                                                */
+/* ------------------------------------------------------------------ */
+
 async function main() {
   loadDotEnv();
   const env = getEnv();
-  console.log("🔧 Analyze pipeline: wd_tagger -> keyword_model");
+  console.log("🧠 Vision pipeline: Ollama qwen2.5vl → analyze + SEO + VIP");
+  console.log(`🔗 Ollama: ${env.OLLAMA_URL} | Model: ${env.OLLAMA_MODEL}`);
+  console.log(`⚡ Concurrency: ${env.AI_ANALYSIS_CONCURRENCY} | Retries: ${env.MODEL_RETRY_COUNT}`);
 
   const config = await buildConfig(env);
 
   console.log(`\n✅ Config saved: ${env.MEDIA_CONFIG_PATH}`);
-  console.log(`🏷 Global hashtags: ${config.hashtags.length}`);
-  console.log(`📦 Items ready for upload: ${config.items.length}`);
+  console.log(`🏷  Global hashtags: ${config.hashtags.length}`);
+  console.log(`📦 Items ready: ${config.items.length}`);
+
+  const vipCount = config.items.filter((i) => i.vip).length;
+  const analyzedCount = config.items.filter(
+    (i) => String(i.title || "").trim().length > 0
+  ).length;
+  console.log(`🔞 VIP items: ${vipCount}`);
+  console.log(`🎯 Analyzed: ${analyzedCount}/${config.items.length}`);
 }
 
 main().catch((err) => {
-  console.error("❌ Failed to generate config:", err.message);
+  console.error("❌ Failed:", err.message);
   process.exit(1);
 });

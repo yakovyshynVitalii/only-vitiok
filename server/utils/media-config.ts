@@ -9,6 +9,9 @@ export interface ConfigItem {
   title?: string;
   description?: string;
   hashtags?: string[];
+  trendTermsUsed?: string[];
+  trendScore?: number;
+  contentSummary?: string;
   vip?: boolean;
   uploaded?: boolean;
 }

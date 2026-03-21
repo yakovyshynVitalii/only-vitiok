@@ -31,6 +31,9 @@ interface ConfigItem {
   title?: string;
   description?: string;
   hashtags?: string[];
+  trendTermsUsed?: string[];
+  trendScore?: number;
+  contentSummary?: string;
   vip?: boolean;
 }
 
@@ -1238,6 +1241,37 @@ onBeforeUnmount(() => {
                       Add
                     </UButton>
                   </div>
+
+                  <div v-if="item.contentSummary" class="content-summary">
+                    <span class="summary-label">👁️ AI Vision:</span>
+                    <span class="summary-text">{{ item.contentSummary }}</span>
+                  </div>
+
+                  <div v-if="item.trendTermsUsed?.length || item.trendScore" class="trend-section">
+                    <div class="trend-header">
+                      <span class="trend-label">📈 SEO Trends</span>
+                      <UBadge
+                        v-if="item.trendScore"
+                        :color="item.trendScore >= 60 ? 'success' : item.trendScore >= 30 ? 'warning' : 'neutral'"
+                        variant="soft"
+                        size="sm"
+                      >
+                        Score: {{ item.trendScore }}/100
+                      </UBadge>
+                    </div>
+                    <div v-if="item.trendTermsUsed?.length" class="trend-terms">
+                      <UBadge
+                        v-for="term in item.trendTermsUsed"
+                        :key="`trend-${index}-${term}`"
+                        color="success"
+                        variant="subtle"
+                        size="sm"
+                      >
+                        🔥 {{ term }}
+                      </UBadge>
+                    </div>
+                    <p v-else class="trend-none">No trending terms matched this content</p>
+                  </div>
                 </div>
               </UCard>
               <p v-if="!configItems.length" class="muted-text">
@@ -1758,6 +1792,61 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+.content-summary {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ui-color-info) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ui-color-info) 20%, transparent);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.summary-label {
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--ui-color-info);
+}
+
+.summary-text {
+  color: var(--ui-text-muted);
+}
+
+.trend-section {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--ui-bg-muted);
+  border: 1px solid var(--ui-border);
+}
+
+.trend-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.trend-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ui-text-muted);
+}
+
+.trend-terms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.trend-none {
+  font-size: 0.75rem;
+  color: var(--ui-text-dimmed);
+  margin: 0;
 }
 
 .actions-row {

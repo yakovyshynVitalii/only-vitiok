@@ -2,6 +2,7 @@
 node_modules/
 
 # Media data
+/media/
 media-config.json
 analysis-cache.json
 state.json
