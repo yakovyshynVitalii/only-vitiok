@@ -1,7 +1,6 @@
 import path from "node:path";
 import { importProjectRootMediaFiles } from "~/server/utils/media-files";
-import { readSettings } from "~/server/utils/settings";
-import { ensureMediaFolder } from "~/server/utils/settings";
+import { ensureMediaFolder, readSettings } from "~/server/utils/settings";
 import { runScriptTask } from "~/server/utils/process-runner";
 import {
   startOllamaServe,

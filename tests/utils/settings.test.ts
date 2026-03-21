@@ -29,6 +29,7 @@ describe("settings utils", () => {
     const settings = settingsMod.readSettings();
     expect(settings.env.BASE_URL).toBe("");
     expect(settings.env.MEDIA_FOLDER).toBe("./media");
+    expect(settings.env.MEDIA_IMPORT_PROJECT_ROOT).toBe("true");
     expect(settings.collectionId).toBe("");
     expect(settings.autoUploadAfterAnalyze).toBe(false);
   });

@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   readSettings: vi.fn(),
+  ensureMediaFolder: vi.fn(),
   runScriptTask: vi.fn(),
   startOllamaServe: vi.fn(),
   warmupOllamaModel: vi.fn(),
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("~/server/utils/settings", () => ({
   readSettings: mocks.readSettings,
+  ensureMediaFolder: mocks.ensureMediaFolder,
 }));
 
 vi.mock("~/server/utils/process-runner", () => ({
@@ -26,6 +28,7 @@ vi.mock("~/server/utils/ollama-runner", () => ({
 
 describe("POST /api/run/analyze", () => {
   test("runs analyze without auto upload", async () => {
+    mocks.ensureMediaFolder.mockReturnValue("/tmp/media");
     mocks.readSettings.mockReturnValue({
       env: {
         AUTO_UPLOAD_AFTER_ANALYZE: "false",
@@ -59,6 +62,7 @@ describe("POST /api/run/analyze", () => {
   });
 
   test("runs auto upload when AUTO_UPLOAD_AFTER_ANALYZE is true", async () => {
+    mocks.ensureMediaFolder.mockReturnValue("/tmp/media");
     mocks.readSettings.mockReturnValue({
       env: {
         AUTO_UPLOAD_AFTER_ANALYZE: "true",
@@ -104,6 +108,7 @@ describe("POST /api/run/analyze", () => {
   });
 
   test("stops model and serve in finally block even when analyze fails", async () => {
+    mocks.ensureMediaFolder.mockReturnValue("/tmp/media");
     mocks.readSettings.mockReturnValue({
       env: {
         AUTO_UPLOAD_AFTER_ANALYZE: "false",
