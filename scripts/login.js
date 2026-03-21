@@ -4,7 +4,7 @@ require("dotenv").config();
 (async () => {
   const baseUrl = process.env.BASE_URL;
   if (!baseUrl) {
-    throw new Error("BASE_URL не задано. Додай BASE_URL у .env");
+    throw new Error("BASE_URL is missing. Add BASE_URL to .env");
   }
 
   const browser = await chromium.launch({ headless: false });
@@ -15,14 +15,14 @@ require("dotenv").config();
     waitUntil: "networkidle",
   });
 
-  console.log("🔐 Залогінься якщо потрібно.");
-  console.log("Після логіну натисни Enter...");
+  console.log("🔐 Sign in if required.");
+  console.log("Press Enter after login...");
 
   process.stdin.resume();
   await new Promise((res) => process.stdin.once("data", res));
 
   await context.storageState({ path: "state.json" });
-  console.log("✅ state.json збережено");
+  console.log("✅ state.json saved");
 
   await browser.close();
 })();

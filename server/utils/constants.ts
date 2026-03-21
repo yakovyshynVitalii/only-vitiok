@@ -1,0 +1,51 @@
+import path from "node:path";
+
+export const ROOT_DIR = process.cwd();
+export const ENV_PATH = path.resolve(ROOT_DIR, ".env");
+export const STATE_PATH = path.resolve(ROOT_DIR, "state.json");
+
+export const DEFAULT_ENV: Record<string, string> = {
+  BASE_URL: "",
+  CREATE_URL: "",
+  COLLECTION_ID: "",
+  OLLAMA_URL: "http://127.0.0.1:11434",
+  OLLAMA_MODEL: "qwen2.5vl:3b-q4_K_M",
+  AI_ANALYSIS_CONCURRENCY: "3",
+  VIDEO_TAG_BATCH_SIZE: "6",
+  MODEL_RETRY_COUNT: "2",
+  VIDEO_ANALYSIS_FRAME_COUNT: "4",
+  VIDEO_ANALYSIS_RETRY_COUNT: "1",
+  VIDEO_MODEL_FRAME_LIMIT: "10",
+  ANALYSIS_CACHE_PATH: "./analysis-cache.json",
+  MEDIA_FOLDER: "./media",
+  TAG_CATEGORIES_PATH: "./config/tag-categories.txt",
+  MEDIA_CONFIG_PATH: "./media-config.json",
+  HEADLESS: "false",
+  UPLOAD_RETRY_DELAY_MS: "100000",
+  UPLOAD_RESTART_ATTEMPTS: "20",
+  UPLOAD_ACTION_DELAY_MS: "150",
+  AUTO_UPLOAD_AFTER_ANALYZE: "false",
+};
+
+export const ENV_WRITE_ORDER = [
+  "BASE_URL",
+  "COLLECTION_ID",
+  "CREATE_URL",
+  "OLLAMA_URL",
+  "OLLAMA_MODEL",
+  "AI_ANALYSIS_CONCURRENCY",
+  "VIDEO_TAG_BATCH_SIZE",
+  "MODEL_RETRY_COUNT",
+  "VIDEO_ANALYSIS_FRAME_COUNT",
+  "VIDEO_ANALYSIS_RETRY_COUNT",
+  "VIDEO_MODEL_FRAME_LIMIT",
+  "ANALYSIS_CACHE_PATH",
+  "MEDIA_FOLDER",
+  "TAG_CATEGORIES_PATH",
+  "MEDIA_CONFIG_PATH",
+  "HEADLESS",
+  "UPLOAD_RETRY_DELAY_MS",
+  "UPLOAD_RESTART_ATTEMPTS",
+  "UPLOAD_ACTION_DELAY_MS",
+  "AUTO_UPLOAD_AFTER_ANALYZE",
+];

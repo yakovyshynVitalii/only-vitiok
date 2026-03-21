@@ -5,7 +5,7 @@ const { spawnSync } = require("child_process");
 
 const TARGET_GLOBAL_HASHTAGS = 15;
 const MAX_ITEM_HASHTAGS = 12;
-const MIN_ITEM_HASHTAGS = 4;
+const VIDEO_ANALYSIS_FRAME_COUNT = 3;
 const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵", "🍑", "👅", "🫦", "❤️‍🔥"];
 const DESCRIPTION_EMOJIS = [
   "💦",
@@ -72,7 +72,7 @@ const EXPLICIT_VIP_KEYWORDS =
 function getEnv() {
   const ollamaUrl = process.env.OLLAMA_URL;
   if (!ollamaUrl) {
-    throw new Error("OLLAMA_URL не задано. Додай OLLAMA_URL у .env");
+    throw new Error("OLLAMA_URL is missing. Add OLLAMA_URL to .env");
   }
 
   const parsedConcurrency = Number(process.env.AI_ANALYSIS_CONCURRENCY || 3);
@@ -131,7 +131,7 @@ function normalizeTags(tags) {
 
 function loadAllowedTags(filePath) {
   if (!fs.existsSync(filePath)) {
-    throw new Error(`Файл категорій тегів не знайдено: ${filePath}`);
+    throw new Error(`Tag categories file not found: ${filePath}`);
   }
 
   const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
@@ -143,26 +143,9 @@ function loadAllowedTags(filePath) {
 
   const unique = [...new Set(tags)];
   if (!unique.length) {
-    throw new Error(`Файл категорій тегів порожній: ${filePath}`);
+    throw new Error(`Tag categories file is empty: ${filePath}`);
   }
   return unique;
-}
-
-function ensureTagRange(
-  tags,
-  target = TARGET_GLOBAL_HASHTAGS,
-  fallbackPool = []
-) {
-  const unique = [
-    ...new Set((tags || []).map(normalizeHashtag).filter(Boolean)),
-  ];
-
-  for (const tag of fallbackPool.map(normalizeHashtag).filter(Boolean)) {
-    if (unique.length >= target) break;
-    if (!unique.includes(tag)) unique.push(tag);
-  }
-
-  return unique.slice(0, target);
 }
 
 function filterModelTags(tags, allowedTagSet) {
@@ -173,19 +156,11 @@ function filterModelTags(tags, allowedTagSet) {
   return [...new Set(filtered)];
 }
 
-function normalizeItemTags(tags, globalTags) {
+function normalizeItemTags(tags) {
   const ownTags = [
     ...new Set((tags || []).map(normalizeHashtag).filter(Boolean)),
   ];
-  const merged = [...ownTags];
-
-  for (const tag of globalTags || []) {
-    if (merged.length >= Math.max(MIN_ITEM_HASHTAGS, MAX_ITEM_HASHTAGS)) break;
-    if (!merged.includes(tag)) merged.push(tag);
-  }
-
-  if (!merged.length) return [];
-  return merged.slice(0, MAX_ITEM_HASHTAGS);
+  return ownTags.slice(0, MAX_ITEM_HASHTAGS);
 }
 
 function sanitizeEnglishText(value, fallback = "") {
@@ -261,9 +236,15 @@ function toBase64(filePath) {
   return fs.readFileSync(filePath).toString("base64");
 }
 
+function writeJsonAtomic(filePath, value) {
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), "utf8");
+  fs.renameSync(tempPath, filePath);
+}
+
 function parseJsonFromText(text) {
   const raw = String(text || "").trim();
-  if (!raw) throw new Error("Порожня відповідь моделі");
+  if (!raw) throw new Error("Model returned an empty response");
 
   try {
     return JSON.parse(raw);
@@ -280,7 +261,7 @@ function parseJsonFromText(text) {
     return JSON.parse(raw.slice(start, end + 1));
   }
 
-  throw new Error(`Не вдалося розпарсити JSON від моделі: ${raw}`);
+  throw new Error(`Could not parse model JSON response: ${raw}`);
 }
 
 function hasFfmpeg() {
@@ -347,22 +328,65 @@ function getVideoDurationSeconds(videoPath) {
   return Number.isFinite(seconds) ? seconds : null;
 }
 
-function extractVideoFrame(videoPath) {
-  if (!hasFfmpeg()) return null;
+function buildVideoFrameTimestamps(
+  durationSeconds,
+  frameCount = VIDEO_ANALYSIS_FRAME_COUNT
+) {
+  const safeCount = Math.max(1, Math.min(10, Math.round(frameCount || 5)));
 
-  const tempFile = path.join(
-    os.tmpdir(),
-    `onlynice-frame-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`
-  );
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return Array.from({ length: safeCount }, (_, i) => 0.5 + i * 1.0);
+  }
 
-  const run = spawnSync(
-    "ffmpeg",
-    ["-y", "-i", videoPath, "-ss", "00:00:01", "-vframes", "1", tempFile],
-    { stdio: "ignore" }
-  );
+  const maxTs = Math.max(0.05, durationSeconds - 0.05);
+  const timestamps = [];
 
-  if (run.status !== 0 || !fs.existsSync(tempFile)) return null;
-  return tempFile;
+  for (let i = 0; i < safeCount; i += 1) {
+    const fraction = (i + 1) / (safeCount + 1);
+    const ts = Math.min(maxTs, Math.max(0, durationSeconds * fraction));
+    timestamps.push(Number(ts.toFixed(3)));
+  }
+
+  return [...new Set(timestamps)];
+}
+
+function extractVideoFrames(
+  videoPath,
+  durationSeconds,
+  frameCount = VIDEO_ANALYSIS_FRAME_COUNT
+) {
+  if (!hasFfmpeg()) return [];
+
+  const timestamps = buildVideoFrameTimestamps(durationSeconds, frameCount);
+  const frames = [];
+
+  for (const timestamp of timestamps) {
+    const tempFile = path.join(
+      os.tmpdir(),
+      `onlynice-frame-${Date.now()}-${Math.random().toString(36).slice(2)}.jpg`
+    );
+
+    const run = spawnSync(
+      "ffmpeg",
+      [
+        "-y",
+        "-ss",
+        String(timestamp),
+        "-i",
+        videoPath,
+        "-vframes",
+        "1",
+        tempFile,
+      ],
+      { stdio: "ignore" }
+    );
+
+    if (run.status === 0 && fs.existsSync(tempFile)) {
+      frames.push(tempFile);
+    }
+  }
+
+  return frames;
 }
 
 async function callVisionModel({
@@ -378,12 +402,12 @@ async function callVisionModel({
       ? `Video duration seconds: ${Math.round(videoDurationSeconds)}.`
       : "";
   const prompt = [
-    `Файл: ${filename}. Тип: ${mediaType}.`,
+    `File: ${filename}. Media type: ${mediaType}.`,
     durationLine,
-    "Ти контент-редактор для сайту з медіафайлами.",
-    "Поверни тільки JSON (без markdown):",
+    "You are a content editor for a media platform.",
+    "Return JSON only (no markdown):",
     '{"title":"...","description":"...","hashtags":["fashion","lingerie"],"vip":true}',
-    "Правила:",
+    "Rules:",
     "- title: only English, short, up to 60 chars, sexual tone",
     "- description: only English, 1-2 sentences, up to 220 chars, sexual tone",
     "- emoji are allowed and recommended in title/description",
@@ -399,8 +423,9 @@ async function callVisionModel({
     "- vip: boolean true/false",
     "- for images: vip=true if content is highly nude/pornographic, else false",
     "- for videos: vip will be calculated by code using duration only",
-    "- не використовуй tag, tag1, tag2 і подібні технічні значення",
-    "- без зайвого тексту поза JSON",
+    `- for videos: you receive ${VIDEO_ANALYSIS_FRAME_COUNT} sampled frames across the timeline, use all of them`,
+    "- do not use technical placeholder tags like tag, tag1, tag2",
+    "- no extra text outside JSON",
   ].join("\n");
 
   const images = [];
@@ -418,8 +443,12 @@ async function callVisionModel({
   }
 
   if (mediaType === "video") {
-    const framePath = extractVideoFrame(filePath);
-    if (framePath) {
+    const framePaths = extractVideoFrames(
+      filePath,
+      videoDurationSeconds,
+      VIDEO_ANALYSIS_FRAME_COUNT
+    );
+    for (const framePath of framePaths) {
       images.push(toBase64(framePath));
       try {
         fs.unlinkSync(framePath);
@@ -450,13 +479,13 @@ async function callVisionModel({
     });
   } catch (err) {
     throw new Error(
-      `Немає з'єднання з Ollama (${env.OLLAMA_URL}). Запусти 'ollama serve'. Деталі: ${err.message}`
+      `No connection to Ollama (${env.OLLAMA_URL}). Start 'ollama serve'. Details: ${err.message}`
     );
   }
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`Ollama API помилка: ${response.status} ${errText}`);
+    throw new Error(`Ollama API error: ${response.status} ${errText}`);
   }
 
   const data = await response.json();
@@ -531,7 +560,7 @@ async function buildConfig(env) {
   const allowedTagSet = new Set(allowedTags);
 
   if (!fs.existsSync(env.MEDIA_FOLDER)) {
-    throw new Error(`Папка media не знайдена: ${env.MEDIA_FOLDER}`);
+    throw new Error(`Media folder not found: ${env.MEDIA_FOLDER}`);
   }
 
   const allFiles = fs
@@ -544,12 +573,62 @@ async function buildConfig(env) {
   );
 
   if (!files.length) {
-    throw new Error(
-      `У папці ${env.MEDIA_FOLDER} немає підтримуваних media-файлів`
-    );
+    throw new Error(`No supported media files found in ${env.MEDIA_FOLDER}`);
   }
 
-  const items = [];
+  let existingConfig = null;
+  if (fs.existsSync(env.MEDIA_CONFIG_PATH)) {
+    try {
+      existingConfig = JSON.parse(fs.readFileSync(env.MEDIA_CONFIG_PATH, "utf8"));
+    } catch {
+      existingConfig = null;
+    }
+  }
+
+  const existingItemsByFile = new Map();
+  if (existingConfig && Array.isArray(existingConfig.items)) {
+    for (const item of existingConfig.items) {
+      const fileName = String(item?.fileName || "").trim();
+      if (!fileName) continue;
+      existingItemsByFile.set(fileName, item);
+    }
+  }
+
+  const items = files.map((file) => {
+    const fullPath = path.join(env.MEDIA_FOLDER, file);
+    const mediaType = detectMediaType(fullPath);
+    const existing = existingItemsByFile.get(file);
+
+    if (existing) {
+      return {
+        filePath: fullPath,
+        fileName: file,
+        mediaType,
+        title: String(existing.title || "").trim(),
+        description: String(existing.description || "").trim(),
+        hashtags: normalizeTags(existing.hashtags || []),
+        vip: Boolean(existing.vip),
+        videoDurationSeconds: Number.isFinite(existing.videoDurationSeconds)
+          ? Math.round(existing.videoDurationSeconds)
+          : null,
+        uploaded: Boolean(existing.uploaded),
+      };
+    }
+
+    return {
+      filePath: fullPath,
+      fileName: file,
+      mediaType,
+      title: "",
+      description: "",
+      hashtags: [],
+      vip: false,
+      videoDurationSeconds: null,
+      uploaded: false,
+    };
+  });
+
+  const completedMap = new Array(files.length).fill(false);
   const concurrency = env.AI_ANALYSIS_CONCURRENCY || 3;
   const total = files.length;
   const startedAt = Date.now();
@@ -558,6 +637,22 @@ async function buildConfig(env) {
   let lastProgressLineLength = 0;
   let spinnerIndex = 0;
   const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+  function isItemAnalyzed(item) {
+    return (
+      String(item.title || "").trim().length > 0 &&
+      String(item.description || "").trim().length > 0 &&
+      Array.isArray(item.hashtags) &&
+      item.hashtags.length > 0
+    );
+  }
+
+  for (let index = 0; index < items.length; index += 1) {
+    if (isItemAnalyzed(items[index])) {
+      completedMap[index] = true;
+      completed += 1;
+    }
+  }
 
   function clearProgressLine() {
     if (!process.stdout.isTTY) return;
@@ -585,7 +680,7 @@ async function buildConfig(env) {
     const spinner = spinnerFrames[spinnerIndex % spinnerFrames.length];
     spinnerIndex += 1;
     const line =
-      `📊 ${spinner} Аналіз ${bar} ${roundedPercent}% (${completed}/${total})` +
+      `📊 ${spinner} Analysis ${bar} ${roundedPercent}% (${completed}/${total})` +
       ` | fallback: ${fallbackCount}` +
       ` | elapsed: ${formatDuration(elapsedSec)}` +
       ` | eta: ${formatDuration(etaSec)}`;
@@ -603,6 +698,32 @@ async function buildConfig(env) {
     } else {
       console.log(line);
     }
+  }
+
+  function recomputeGlobalHashtags() {
+    const completedItems = items.filter((_, index) => completedMap[index]);
+    return rankGlobalHashtags(completedItems)
+      .filter((tag) => allowedTagSet.has(tag))
+      .slice(0, TARGET_GLOBAL_HASHTAGS);
+  }
+
+  function persistConfigSnapshot() {
+    const hashtags = recomputeGlobalHashtags();
+
+    for (let index = 0; index < items.length; index += 1) {
+      if (!completedMap[index]) continue;
+      items[index].hashtags = normalizeItemTags(items[index].hashtags);
+    }
+
+    const snapshot = {
+      generatedAt: new Date().toISOString(),
+      sourceFolder: env.MEDIA_FOLDER,
+      hashtags,
+      items,
+    };
+
+    writeJsonAtomic(env.MEDIA_CONFIG_PATH, snapshot);
+    return snapshot;
   }
 
   async function analyzeFile(file) {
@@ -623,7 +744,7 @@ async function buildConfig(env) {
       });
     } catch (err) {
       usedFallback = true;
-      logInfo(`⚠️  AI аналіз не вдався для ${file}: ${err.message}`);
+      logInfo(`⚠️  AI analysis failed for ${file}: ${err.message}`);
       const fallbackTag =
         normalizeHashtag(path.parse(file).name.split(/[\s._-]/)[0]) || "media";
       const durationVip =
@@ -655,44 +776,48 @@ async function buildConfig(env) {
     };
   }
 
+  // Persist placeholders so UI can render cards immediately.
+  persistConfigSnapshot();
+
   renderProgress();
-  for (let i = 0; i < files.length; i += concurrency) {
-    const batch = files.slice(i, i + concurrency);
-    const batchResults = await Promise.all(
-      batch.map((file) => analyzeFile(file))
-    );
-    for (const result of batchResults) {
-      items.push(result);
+
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, files.length);
+
+  async function runWorker() {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= files.length) return;
+
+      const file = files[index];
+      if (completedMap[index]) {
+        renderProgress();
+        continue;
+      }
+      const result = await analyzeFile(file);
+
+      const current = items[index];
+      current.mediaType = result.mediaType;
+      current.title = result.title;
+      current.description = result.description;
+      current.hashtags = result.hashtags;
+      current.vip = Boolean(result.vip);
+      current.videoDurationSeconds = result.videoDurationSeconds;
+      current.uploaded = false;
+
+      completedMap[index] = true;
       completed += 1;
       if (result.usedFallback) fallbackCount += 1;
+
+      persistConfigSnapshot();
       renderProgress();
     }
   }
 
-  for (const item of items) {
-    delete item.usedFallback;
-  }
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
 
-  const rankedGlobal = rankGlobalHashtags(items).filter((tag) =>
-    allowedTagSet.has(tag)
-  );
-  const hashtags = ensureTagRange(
-    rankedGlobal,
-    TARGET_GLOBAL_HASHTAGS,
-    allowedTags
-  );
-
-  for (const item of items) {
-    const itemTags = normalizeItemTags(item.hashtags, hashtags);
-    item.hashtags = itemTags.length ? itemTags : hashtags.slice(0, 2);
-  }
-
-  return {
-    generatedAt: new Date().toISOString(),
-    sourceFolder: env.MEDIA_FOLDER,
-    hashtags,
-    items,
-  };
+  return persistConfigSnapshot();
 }
 
 async function main() {
@@ -700,18 +825,13 @@ async function main() {
   const env = getEnv();
 
   const config = await buildConfig(env);
-  fs.writeFileSync(
-    env.MEDIA_CONFIG_PATH,
-    JSON.stringify(config, null, 2),
-    "utf8"
-  );
 
-  console.log(`\n✅ Конфіг збережено: ${env.MEDIA_CONFIG_PATH}`);
-  console.log(`🏷 Глобальних хештегів: ${config.hashtags.length}`);
-  console.log(`📦 Елементів для аплоаду: ${config.items.length}`);
+  console.log(`\n✅ Config saved: ${env.MEDIA_CONFIG_PATH}`);
+  console.log(`🏷 Global hashtags: ${config.hashtags.length}`);
+  console.log(`📦 Items ready for upload: ${config.items.length}`);
 }
 
 main().catch((err) => {
-  console.error("❌ Не вдалося створити конфіг:", err.message);
+  console.error("❌ Failed to generate config:", err.message);
   process.exit(1);
 });

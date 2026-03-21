@@ -5,7 +5,7 @@ const path = require("path");
 function getEnv() {
   const createUrl = process.env.CREATE_URL;
   if (!createUrl) {
-    throw new Error("CREATE_URL не задано. Додай CREATE_URL у .env");
+    throw new Error("CREATE_URL is missing. Add CREATE_URL to .env");
   }
 
   return {
@@ -31,12 +31,12 @@ function loadDotEnv() {
 
 function readConfig(configPath) {
   if (!fs.existsSync(configPath)) {
-    throw new Error(`Конфіг не знайдено: ${configPath}`);
+    throw new Error(`Config not found: ${configPath}`);
   }
 
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   if (!Array.isArray(config.items)) {
-    throw new Error("Невірний формат media-config.json: items не масив");
+    throw new Error("Invalid media-config.json format: items is not an array");
   }
   return config;
 }
@@ -49,16 +49,33 @@ function normalizeTag(value) {
 }
 
 function getTagsFromConfig(config) {
-  const fromGlobal = Array.isArray(config.hashtags) ? config.hashtags : [];
-  const fromFirstItem = config.items?.[0]?.hashtags || [];
-  const source = fromGlobal.length ? fromGlobal : fromFirstItem;
-  return [...new Set(source.map(normalizeTag).filter(Boolean))];
+  const fromGlobal = Array.isArray(config.hashtags)
+    ? [...new Set(config.hashtags.map(normalizeTag).filter(Boolean))]
+    : [];
+
+  if (fromGlobal.length) {
+    return fromGlobal.slice(0, 15);
+  }
+
+  const stats = new Map();
+  for (const item of config.items || []) {
+    for (const tag of Array.isArray(item?.hashtags) ? item.hashtags : []) {
+      const normalized = normalizeTag(tag);
+      if (!normalized) continue;
+      stats.set(normalized, (stats.get(normalized) || 0) + 1);
+    }
+  }
+
+  return [...stats.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 15)
+    .map(([tag]) => tag);
 }
 
 async function openTagModal(page) {
   const tagButtons = page.locator('button:has(span[class*="i-solar:tag-outline"]):visible');
   const count = await tagButtons.count();
-  if (!count) throw new Error("Кнопка тегів не знайдена");
+  if (!count) throw new Error("Tag button not found");
 
   // The page may have multiple tag icons; try candidates until modal controls appear.
   for (let i = 0; i < Math.min(count, 6); i += 1) {
@@ -77,7 +94,7 @@ async function openTagModal(page) {
     if (inputVisible && addVisible) return;
   }
 
-  throw new Error("Модалка тегів не відкрилась (не знайдені input/add controls)");
+  throw new Error("Tag modal did not open (input/add controls not found)");
 }
 
 async function addAllTagsInModal(page, tags) {
@@ -99,13 +116,13 @@ async function addAllTagsInModal(page, tags) {
 
     const enabled = await addBtn.isEnabled().catch(() => false);
     if (!enabled) {
-      console.log(`⚠️  Кнопка додавання неактивна для тега: ${tag}`);
+      console.log(`⚠️  Add button is disabled for tag: ${tag}`);
       continue;
     }
 
     await addBtn.click();
     await page.waitForTimeout(180);
-    console.log(`🏷 Додано тег: ${tag}`);
+    console.log(`🏷 Tag added: ${tag}`);
   }
 }
 
@@ -133,7 +150,7 @@ async function closeTagModal(page) {
   const tags = getTagsFromConfig(config);
 
   if (!tags.length) {
-    console.log("✅ Немає тегів у конфізі для додавання");
+    console.log("✅ No tags found in config to add");
     return;
   }
 
@@ -142,21 +159,21 @@ async function closeTagModal(page) {
   const page = await context.newPage();
 
   try {
-    console.log("1) Відкриваю браузер");
+    console.log("1) Opening browser");
     await page.goto(env.CREATE_URL, { waitUntil: "networkidle" });
-    console.log("2) Сайт завантажено");
+    console.log("2) Site loaded");
 
-    console.log("3) Натискаю кнопку тегів");
+    console.log("3) Clicking tag button");
     await openTagModal(page);
-    console.log("4) Модалка тегів відкрита");
+    console.log("4) Tag modal is open");
 
-    console.log(`5-6) Додаю теги (${tags.length} шт.)`);
+    console.log(`5-6) Adding tags (${tags.length})`);
     await addAllTagsInModal(page, tags);
 
-    console.log("7) Закриваю модалку тегів");
+    console.log("7) Closing tag modal");
     await closeTagModal(page);
   } finally {
-    console.log("8) Закриваю браузер");
+    console.log("8) Closing browser");
     await browser.close();
   }
 })();

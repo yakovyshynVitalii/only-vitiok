@@ -1,0 +1,23 @@
+@import "@fontsource/roboto/400.css";
+@import "@fontsource/roboto/500.css";
+@import "@fontsource/roboto/700.css";
+@import "@fontsource/roboto/900.css";
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+:root {
+  --ui-color-neutral-900: var(--color-slate-900, oklch(20.8% 0.042 265.755));
+}
+
+html,
+body,
+#__nuxt {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Roboto", "Segoe UI", system-ui, sans-serif;
+  background: var(--ui-color-neutral-900);
+  color: #e2e8f0;
+}

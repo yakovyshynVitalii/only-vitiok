@@ -5,7 +5,7 @@ const path = require("path");
 function getEnv() {
   const createUrl = process.env.CREATE_URL;
   if (!createUrl) {
-    throw new Error("CREATE_URL не задано. Додай CREATE_URL у .env");
+    throw new Error("CREATE_URL is missing. Add CREATE_URL to .env");
   }
 
   return {
@@ -34,12 +34,12 @@ function loadDotEnv() {
 
 function readConfig(env) {
   if (!fs.existsSync(env.MEDIA_CONFIG_PATH)) {
-    throw new Error(`Конфіг не знайдено: ${env.MEDIA_CONFIG_PATH}`);
+    throw new Error(`Config not found: ${env.MEDIA_CONFIG_PATH}`);
   }
 
   const config = JSON.parse(fs.readFileSync(env.MEDIA_CONFIG_PATH, "utf8"));
   if (!Array.isArray(config.items)) {
-    throw new Error("Невірний формат media-config.json: items не масив");
+    throw new Error("Invalid media-config.json format: items is not an array");
   }
   return config;
 }
@@ -89,7 +89,7 @@ function deleteUploadedFilesIfComplete(config) {
       fs.unlinkSync(filePath);
       deleted += 1;
     } catch (err) {
-      console.log(`⚠️  Не вдалося видалити файл: ${filePath} (${err.message})`);
+      console.log(`⚠️  Failed to delete file: ${filePath} (${err.message})`);
     }
   }
   return deleted;
@@ -127,7 +127,7 @@ async function applyExistingHashtags(page, hashtags) {
   const chips = page.locator("span.inline-flex:has(.i-solar\\:tag-outline)");
   const total = await chips.count();
   if (!total) {
-    console.log("⚠️  Список існуючих хештегів не знайдено");
+    console.log("⚠️  Existing hashtag list not found");
     return;
   }
 
@@ -145,7 +145,7 @@ async function applyExistingHashtags(page, hashtags) {
     } catch {}
   }
 
-  console.log(`🏷 Прив'язано хештегів: ${clicked}/${wanted.size}`);
+  console.log(`🏷 Hashtags linked: ${clicked}/${wanted.size}`);
 }
 
 async function applyVipFlag(page, vip) {
@@ -155,7 +155,7 @@ async function applyVipFlag(page, vip) {
     .locator('input[type="checkbox"][name="vip"]')
     .first();
   if ((await vipCheckbox.count()) === 0) {
-    console.log("⚠️  VIP чекбокс не знайдено");
+    console.log("⚠️  VIP checkbox not found");
     return;
   }
 
@@ -173,14 +173,11 @@ async function applyVipFlag(page, vip) {
 async function fillMetadata(page, item) {
   const titleSelectors = [
     'input[name="title"]',
-    'input[placeholder*="Назв" i]',
     'input[placeholder*="Title" i]',
-    'input[placeholder*="Заголов" i]',
   ];
 
   const descriptionSelectors = [
     'textarea[name="description"]',
-    'textarea[placeholder*="Опис" i]',
     'textarea[placeholder*="Description" i]',
   ];
 
@@ -194,10 +191,10 @@ async function fillMetadata(page, item) {
 
   if (titleFilled || descriptionFilled) {
     console.log(
-      `✍️  Metadata заповнено: title=${titleFilled}, description=${descriptionFilled}`
+      `✍️  Metadata filled: title=${titleFilled}, description=${descriptionFilled}`
     );
   } else {
-    console.log("⚠️  Поля metadata не знайдені, пропускаю заповнення");
+    console.log("⚠️  Metadata fields not found, skipping");
   }
 
   await applyVipFlag(page, item.vip);
@@ -207,7 +204,7 @@ async function fillMetadata(page, item) {
 async function clickDoneButton(page) {
   const doneButton = page
     .locator(
-      'button:has-text("Done"), button:has-text("Готово"), button:has-text("Готов"):visible'
+      'button:has-text("Done"):visible'
     )
     .first();
 
@@ -232,7 +229,7 @@ async function clickDoneButton(page) {
 async function openUploadModal(page) {
   const openButtons = [
     "button:has(.i-majesticons\\:plus-line)",
-    'button:has-text("Add"), button:has-text("Додати"), button:has-text("Upload")',
+    'button:has-text("Add"), button:has-text("Upload")',
   ];
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -260,7 +257,7 @@ async function openUploadModal(page) {
     await page.waitForTimeout(700);
   }
 
-  throw new Error("Не вдалося відкрити модалку завантаження (file input не з'явився).");
+  throw new Error("Could not open upload modal (file input did not appear).");
 }
 
 async function runUploadOnce() {
@@ -271,10 +268,10 @@ async function runUploadOnce() {
   const pendingItems = config.items.filter((item) => !item.uploaded);
 
   if (!pendingItems.length) {
-    console.log("✅ Усі файли в конфізі вже завантажені");
+    console.log("✅ All files in config are already uploaded");
     const deleted = deleteUploadedFilesIfComplete(config);
     if (deleted > 0) {
-      console.log(`🧹 Видалено файлів після повного успішного аплоаду: ${deleted}`);
+      console.log(`🧹 Deleted files after successful full upload: ${deleted}`);
     }
     notifyUploadFinished();
     return { retryRequested: false };
@@ -296,14 +293,14 @@ async function runUploadOnce() {
     const filePath = item.filePath;
 
     if (!fs.existsSync(filePath)) {
-      console.log(`⚠️  Файл відсутній, пропускаю: ${filePath}`);
+      console.log(`⚠️  File is missing, skipping: ${filePath}`);
       item.uploaded = true;
       item.error = "file_missing";
       writeConfig(config, env);
       continue;
     }
 
-    console.log(`\n📂 Наступний файл: ${filePath}`);
+    console.log(`\n📂 Next file: ${filePath}`);
 
     try {
       await openUploadModal(page);
@@ -325,20 +322,20 @@ async function runUploadOnce() {
       delete item.error;
       writeConfig(config, env);
 
-      console.log(`✅ Завантажено: ${filePath}`);
+      console.log(`✅ Uploaded: ${filePath}`);
 
       await page.waitForTimeout(5000);
     } catch (err) {
       item.error = err.message;
       writeConfig(config, env);
-      console.log(`❌ Помилка з файлом: ${filePath}`);
+      console.log(`❌ File error: ${filePath}`);
       console.log(err.message);
       lastErrorMessage = err.message || "unknown_upload_error";
 
       if (isFileInputDetachTimeout(err)) {
         retryRequested = true;
         console.log(
-          "⏳ Отримано таймаут detach для file input. Перезапущу upload через 60 секунд."
+          "⏳ File input detach timeout received. Upload will restart in 60 seconds."
         );
       }
 
@@ -358,10 +355,10 @@ async function runUploadOnce() {
   const finalConfig = readConfig(env);
   const deleted = deleteUploadedFilesIfComplete(finalConfig);
   if (deleted > 0) {
-    console.log(`🧹 Видалено файлів після повного успішного аплоаду: ${deleted}`);
+    console.log(`🧹 Deleted files after successful full upload: ${deleted}`);
   }
   if (finalConfig.items.every((item) => item.uploaded)) {
-    console.log("✅ Усі файли в конфізі вже завантажені");
+    console.log("✅ All files in config are already uploaded");
     notifyUploadFinished();
   }
 
@@ -380,15 +377,15 @@ async function runUploadOnce() {
 
     if (attempt === maxAttempts) {
       throw new Error(
-        `Upload не вдався після ${maxAttempts} спроб (таймаут на detach file input).`
+        `Upload failed after ${maxAttempts} attempts (detach timeout on file input).`
       );
     }
 
     const nextAttempt = attempt + 1;
     console.log(
-      `🔁 Спроба ${nextAttempt}/${maxAttempts} стартує через ${Math.round(
+      `🔁 Attempt ${nextAttempt}/${maxAttempts} starts in ${Math.round(
         retryDelayMs / 1000
-      )} сек...`
+      )} sec...`
     );
     await sleep(retryDelayMs);
   }
