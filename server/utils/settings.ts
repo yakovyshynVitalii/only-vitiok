@@ -80,6 +80,10 @@ export function writeSettings(input: {
   autoUploadAfterAnalyze?: boolean;
 }): AppSettings {
   const current = readSettings();
+  const explicitCreateUrlProvided = Object.prototype.hasOwnProperty.call(
+    input.env || {},
+    "CREATE_URL"
+  );
   const nextEnv = {
     ...current.env,
     ...(input.env || {}),
@@ -89,9 +93,11 @@ export function writeSettings(input: {
     const trimmedCollection = input.collectionId.trim();
     nextEnv.COLLECTION_ID = trimmedCollection;
 
-    const generatedCreateUrl = buildCreateUrl(nextEnv.BASE_URL, trimmedCollection);
-    if (generatedCreateUrl) {
-      nextEnv.CREATE_URL = generatedCreateUrl;
+    if (!explicitCreateUrlProvided) {
+      const generatedCreateUrl = buildCreateUrl(nextEnv.BASE_URL, trimmedCollection);
+      if (generatedCreateUrl) {
+        nextEnv.CREATE_URL = generatedCreateUrl;
+      }
     }
   }
 

@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { makeTempDir, removeDir } from "../helpers/fs";
+
+const originalCwd = process.cwd();
 
 function writeScript(dirPath: string, fileName: string, body: string): string {
   const filePath = path.join(dirPath, fileName);
@@ -72,6 +74,39 @@ describe("process-runner", () => {
         stopRequested: false,
       });
     } finally {
+      removeDir(tmp);
+    }
+  });
+
+  test("runScriptTask uses latest CREATE_URL from .env over stale process env", async () => {
+    const tmp = makeTempDir();
+    const previousCreateUrl = process.env.CREATE_URL;
+
+    try {
+      process.chdir(tmp);
+      fs.writeFileSync(
+        path.join(tmp, ".env"),
+        "CREATE_URL=https://collections.only-nice.com/collection/fresh\n",
+        "utf8"
+      );
+      writeScript(tmp, "print-env.js", "console.log(process.env.CREATE_URL || '')");
+
+      process.env.CREATE_URL = "https://collections.only-nice.com/collection/stale";
+      vi.resetModules();
+      const { runScriptTask } = await import("~/server/utils/process-runner");
+
+      const result = await runScriptTask("add-tags", "print-env.js");
+      expect(result.output).toContain(
+        "https://collections.only-nice.com/collection/fresh"
+      );
+    } finally {
+      if (previousCreateUrl == null) {
+        delete process.env.CREATE_URL;
+      } else {
+        process.env.CREATE_URL = previousCreateUrl;
+      }
+      process.chdir(originalCwd);
+      vi.resetModules();
       removeDir(tmp);
     }
   });

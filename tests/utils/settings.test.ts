@@ -68,6 +68,36 @@ describe("settings utils", () => {
     expect(persisted).toContain("AUTO_UPLOAD_AFTER_ANALYZE=true");
   });
 
+  test("writeSettings keeps explicit CREATE_URL when collectionId is provided", async () => {
+    const tempDir = makeTempDir();
+    tempDirs.push(tempDir);
+    process.chdir(tempDir);
+    fs.writeFileSync(
+      path.resolve(tempDir, ".env"),
+      [
+        "BASE_URL=https://collections.only-nice.com",
+        "COLLECTION_ID=old-collection",
+        "CREATE_URL=https://collections.only-nice.com/collection/old-collection",
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const settingsMod = await import("~/server/utils/settings");
+
+    const next = settingsMod.writeSettings({
+      env: {
+        CREATE_URL:
+          "https://collections.only-nice.com/collection/manual-collection?from=custom",
+      },
+      collectionId: "new-collection",
+    });
+
+    expect(next.env.COLLECTION_ID).toBe("new-collection");
+    expect(next.env.CREATE_URL).toBe(
+      "https://collections.only-nice.com/collection/manual-collection?from=custom"
+    );
+  });
+
   test("getMediaFolder/getConfigPath/ensureMediaFolder resolve paths from root", async () => {
     const tempDir = makeTempDir();
     tempDirs.push(tempDir);

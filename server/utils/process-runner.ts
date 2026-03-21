@@ -2,6 +2,7 @@ import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createError } from "h3";
 import { ROOT_DIR } from "./constants";
+import { readSettings } from "./settings";
 
 interface ScriptResult {
   output: string;
@@ -21,6 +22,15 @@ export function getTaskStatus() {
   };
 }
 
+function buildTaskEnv(): NodeJS.ProcessEnv {
+  const settings = readSettings();
+
+  return {
+    ...process.env,
+    ...settings.env,
+  };
+}
+
 export async function runScriptTask(taskName: string, scriptPath: string): Promise<ScriptResult> {
   if (taskState.runningTask) {
     throw createError({
@@ -37,7 +47,7 @@ export async function runScriptTask(taskName: string, scriptPath: string): Promi
     const output = await new Promise<string>((resolve, reject) => {
       const child = spawn(process.execPath, [fullScriptPath], {
         cwd: ROOT_DIR,
-        env: process.env,
+        env: buildTaskEnv(),
       });
       taskState.child = child;
 
