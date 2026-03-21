@@ -15,6 +15,7 @@ Nuxt + Nuxt UI застосунок для керування пайплайно
 - Кнопка `Upload` (`scripts/upload.js`).
 - Чекбокс `Auto upload після Analyze` (`AUTO_UPLOAD_AFTER_ANALYZE` в `.env`).
 - Редактор `media-config.json` прямо з застосунку.
+- Єдиний флоу аналізу: WD Tagger -> LLM по keywords -> `title/description/hashtags`.
 
 ## Технічний стек
 
@@ -51,3 +52,4 @@ pnpm typecheck
 - Для логіну/аплоаду потрібен Playwright + доступ до цільового сайту.
 - Якщо для відео потрібні кадри/тривалість, залишаються залежності на `ffmpeg`/`ffprobe` як і раніше.
 - Якщо покласти `.jpg/.png/.mp4/...` файл у корінь проєкту, він автоматично копіюється в `MEDIA_FOLDER` під час запиту `/api/media` або запуску analyze.
+- Для WD Tagger за замовчуванням використовується Space `SmilingWolf/wd-tagger`; модель задається через `WD_TAGGER_MODEL_REPO` (дефолт `SmilingWolf/wd-swinv2-tagger-v3`).

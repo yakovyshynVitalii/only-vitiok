@@ -13,6 +13,23 @@ export interface ConfigItem {
   uploaded?: boolean;
 }
 
+interface SyncMediaConfigOptions {
+  resetAnalysisForVideos?: boolean;
+}
+
+const VIDEO_EXTENSIONS = new Set([
+  ".mp4",
+  ".mov",
+  ".webm",
+  ".mkv",
+  ".avi",
+  ".m4v",
+]);
+
+function isVideoFile(fileName: string): boolean {
+  return VIDEO_EXTENSIONS.has(path.extname(fileName).toLowerCase());
+}
+
 function getItemFileName(item: ConfigItem): string {
   if (item.fileName) return String(item.fileName);
   if (item.filePath) return path.basename(String(item.filePath));
@@ -22,7 +39,8 @@ function getItemFileName(item: ConfigItem): string {
 export function syncMediaConfig(
   settings: AppSettings,
   mediaFolder: string,
-  files: string[]
+  files: string[],
+  options: SyncMediaConfigOptions = {}
 ): { configPath: string; syncedItems: ConfigItem[] } {
   const configPath = getConfigPath(settings);
   let existingConfig: Record<string, unknown> = {};
@@ -51,8 +69,23 @@ export function syncMediaConfig(
 
   const syncedItems: ConfigItem[] = files.map((file) => {
     const existing = byFileName.get(file);
+    const shouldResetVideoAnalysis =
+      Boolean(options.resetAnalysisForVideos) && isVideoFile(file);
 
     if (existing) {
+      if (shouldResetVideoAnalysis) {
+        return {
+          ...existing,
+          fileName: file,
+          filePath: path.join(mediaFolder, file),
+          title: "",
+          description: "",
+          hashtags: [],
+          vip: false,
+          uploaded: false,
+        };
+      }
+
       return {
         ...existing,
         fileName: file,
@@ -63,6 +96,18 @@ export function syncMediaConfig(
           ? existing.hashtags.filter((tag) => typeof tag === "string")
           : [],
         vip: Boolean(existing.vip),
+      };
+    }
+
+    if (shouldResetVideoAnalysis) {
+      return {
+        fileName: file,
+        filePath: path.join(mediaFolder, file),
+        title: "",
+        description: "",
+        hashtags: [],
+        vip: false,
+        uploaded: false,
       };
     }
 

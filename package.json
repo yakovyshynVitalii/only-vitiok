@@ -27,6 +27,7 @@
   "packageManager": "pnpm@10.15.1",
   "dependencies": {
     "@fontsource/roboto": "^5.2.9",
+    "@gradio/client": "^1.13.1",
     "@nuxt/ui": "^3.3.3",
     "dotenv": "^17.3.1",
     "nuxt": "^3.17.7",

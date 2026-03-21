@@ -6,7 +6,9 @@ export default defineEventHandler(() => {
   const settings = readSettings();
   const mediaFolder = ensureMediaFolder(settings);
   const files = listMediaFiles(mediaFolder);
-  const { syncedItems } = syncMediaConfig(settings, mediaFolder, files);
+  const { syncedItems } = syncMediaConfig(settings, mediaFolder, files, {
+    resetAnalysisForVideos: true,
+  });
 
   return {
     files,

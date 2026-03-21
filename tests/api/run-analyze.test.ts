@@ -133,4 +133,5 @@ describe("POST /api/run/analyze", () => {
     expect(mocks.stopOllamaModel).toHaveBeenCalledWith("model-a");
     expect(mocks.stopOllamaServe).toHaveBeenCalled();
   });
+
 });

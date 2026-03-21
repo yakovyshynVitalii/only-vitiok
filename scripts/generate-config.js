@@ -5,7 +5,7 @@ const { spawnSync } = require("child_process");
 
 const TARGET_GLOBAL_HASHTAGS = 15;
 const MAX_ITEM_HASHTAGS = 12;
-const VIDEO_ANALYSIS_FRAME_COUNT = 3;
+const VIDEO_ANALYSIS_FRAME_COUNT = 6;
 const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵", "🍑", "👅", "🫦", "❤️‍🔥"];
 const DESCRIPTION_EMOJIS = [
   "💦",
@@ -68,22 +68,39 @@ const DEFAULT_SEXY_TAGS = [
 ];
 const EXPLICIT_VIP_KEYWORDS =
   /(blowjob|strapon|hardcore|nsfw|nude|pussy|explicit|penetration|oral sex|anal|boobs|ass)/i;
+let wdTaggerClientPromise = null;
+let gradioModulePromise = null;
 
 function getEnv() {
-  const ollamaUrl = process.env.OLLAMA_URL;
-  if (!ollamaUrl) {
-    throw new Error("OLLAMA_URL is missing. Add OLLAMA_URL to .env");
-  }
-
   const parsedConcurrency = Number(process.env.AI_ANALYSIS_CONCURRENCY || 3);
   const aiConcurrency = Number.isFinite(parsedConcurrency)
     ? Math.max(1, Math.min(8, Math.round(parsedConcurrency)))
     : 3;
+  const parsedRetryCount = Number(process.env.MODEL_RETRY_COUNT || 2);
+  const modelRetryCount = Number.isFinite(parsedRetryCount)
+    ? Math.max(0, Math.min(6, Math.round(parsedRetryCount)))
+    : 2;
+  const ollamaUrl = process.env.OLLAMA_URL;
+
+  if (!ollamaUrl) {
+    throw new Error("OLLAMA_URL is missing. Add OLLAMA_URL to .env");
+  }
 
   return {
     OLLAMA_URL: ollamaUrl,
     OLLAMA_MODEL: process.env.OLLAMA_MODEL || "llava:13b",
+    WD_TAGGER_SPACE: process.env.WD_TAGGER_SPACE || "SmilingWolf/wd-tagger",
+    WD_TAGGER_MODEL_REPO:
+      process.env.WD_TAGGER_MODEL_REPO || "SmilingWolf/wd-swinv2-tagger-v3",
+    WD_TAGGER_GENERAL_THRESHOLD: Number(
+      process.env.WD_TAGGER_GENERAL_THRESHOLD || 0.35
+    ),
+    WD_TAGGER_CHARACTER_THRESHOLD: Number(
+      process.env.WD_TAGGER_CHARACTER_THRESHOLD || 0.85
+    ),
+    HF_TOKEN: String(process.env.HF_TOKEN || "").trim(),
     AI_ANALYSIS_CONCURRENCY: aiConcurrency,
+    MODEL_RETRY_COUNT: modelRetryCount,
     MEDIA_FOLDER: path.resolve(process.env.MEDIA_FOLDER || "./media"),
     TAG_CATEGORIES_PATH: path.resolve(
       process.env.TAG_CATEGORIES_PATH || "./config/tag-categories.txt"
@@ -92,6 +109,21 @@ function getEnv() {
       process.env.MEDIA_CONFIG_PATH || "./media-config.json"
     ),
   };
+}
+
+function isLowQualityModelOutput({ title, description, hashtags, filename }) {
+  const normalizedTitle = String(title || "").trim().toLowerCase();
+  const normalizedDescription = String(description || "").trim().toLowerCase();
+  const normalizedFile = String(filename || "").trim().toLowerCase();
+  const tags = Array.isArray(hashtags) ? hashtags : [];
+
+  if (!normalizedTitle || !normalizedDescription) return true;
+  if (tags.length === 0) return true;
+  if (normalizedTitle === normalizedFile) return true;
+  if (normalizedTitle === path.parse(normalizedFile).name) return true;
+  if (normalizedDescription.startsWith("sexy media content")) return true;
+
+  return false;
 }
 
 function loadDotEnv() {
@@ -389,7 +421,119 @@ function extractVideoFrames(
   return frames;
 }
 
-async function callVisionModel({
+function toHumanTag(tag) {
+  return String(tag || "")
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleFromTags(tags, fileName) {
+  const fallback = sanitizeEnglishText(path.parse(fileName).name, "Media Content");
+  if (!tags.length) return fallback;
+
+  const parts = tags
+    .slice(0, 3)
+    .map(toHumanTag)
+    .filter(Boolean)
+    .map((text) => text.charAt(0).toUpperCase() + text.slice(1));
+
+  return sanitizeEnglishText(parts.join(" • "), fallback);
+}
+
+function descriptionFromTags(tags, fileName) {
+  const fallback = `Highlights: ${sanitizeEnglishText(fileName, "media content")}.`;
+  if (!tags.length) return fallback;
+
+  const preview = tags.slice(0, 8).map(toHumanTag).filter(Boolean).join(", ");
+  return sanitizeEnglishText(`Highlights: ${preview}.`, fallback);
+}
+
+async function getGradioModule() {
+  if (!gradioModulePromise) {
+    gradioModulePromise = import("@gradio/client");
+  }
+  return gradioModulePromise;
+}
+
+async function getWdTaggerClient(env) {
+  if (!wdTaggerClientPromise) {
+    wdTaggerClientPromise = (async () => {
+      const { Client } = await getGradioModule();
+      const options = env.HF_TOKEN ? { token: env.HF_TOKEN } : undefined;
+      return Client.connect(env.WD_TAGGER_SPACE, options);
+    })();
+  }
+
+  try {
+    return await wdTaggerClientPromise;
+  } catch (error) {
+    wdTaggerClientPromise = null;
+    throw error;
+  }
+}
+
+function asConfidenceMap(value) {
+  if (!value || typeof value !== "object") return {};
+  const out = {};
+
+  for (const [key, score] of Object.entries(value)) {
+    const normalized = normalizeHashtag(key);
+    if (!normalized) continue;
+    const numeric = Number(score);
+    if (!Number.isFinite(numeric)) continue;
+    out[normalized] = numeric;
+  }
+
+  return out;
+}
+
+async function runWdTaggerPredict(imagePath, env) {
+  const app = await getWdTaggerClient(env);
+  const { handle_file } = await getGradioModule();
+
+  let response;
+  try {
+    response = await app.predict("/predict", {
+      image: handle_file(imagePath),
+      model_repo: env.WD_TAGGER_MODEL_REPO,
+      general_thresh: env.WD_TAGGER_GENERAL_THRESHOLD,
+      general_mcut_enabled: false,
+      character_thresh: env.WD_TAGGER_CHARACTER_THRESHOLD,
+      character_mcut_enabled: false,
+    });
+  } catch {
+    response = await app.predict("/predict", [
+      handle_file(imagePath),
+      env.WD_TAGGER_MODEL_REPO,
+      env.WD_TAGGER_GENERAL_THRESHOLD,
+      false,
+      env.WD_TAGGER_CHARACTER_THRESHOLD,
+      false,
+    ]);
+  }
+
+  const data = Array.isArray(response?.data) ? response.data : [];
+  const rating = asConfidenceMap(data[1]);
+  const general = asConfidenceMap(data[3]);
+  const textTags = String(data[0] || "")
+    .split(",")
+    .map((tag) => normalizeHashtag(tag))
+    .filter(Boolean);
+
+  if (!Object.keys(general).length && textTags.length) {
+    for (const tag of textTags) {
+      general[tag] = 1;
+    }
+  }
+
+  return {
+    rating,
+    general,
+  };
+}
+
+async function callWdTaggerModel({
   filePath,
   mediaType,
   env,
@@ -397,64 +541,109 @@ async function callVisionModel({
   allowedTags,
 }) {
   const filename = path.basename(filePath);
-  const durationLine =
-    mediaType === "video" && Number.isFinite(videoDurationSeconds)
-      ? `Video duration seconds: ${Math.round(videoDurationSeconds)}.`
-      : "";
-  const prompt = [
-    `File: ${filename}. Media type: ${mediaType}.`,
-    durationLine,
-    "You are a content editor for a media platform.",
-    "Return JSON only (no markdown):",
-    '{"title":"...","description":"...","hashtags":["fashion","lingerie"],"vip":true}',
-    "Rules:",
-    "- title: only English, short, up to 60 chars, sexual tone",
-    "- description: only English, 1-2 sentences, up to 220 chars, sexual tone",
-    "- emoji are allowed and recommended in title/description",
-    "- hashtags: generate 8-12 tags for THIS media only (not one common set for all files)",
-    "- each hashtag MUST map to visible details in this exact media (body parts, clothes, poses, scene, actions, camera angle, mood)",
-    "- do NOT output generic, broad, or unrelated tags; every tag must be directly justified by what is visible in this file",
-    "- sexual and explicit themes in hashtags are allowed when they match the media",
-    "- include at least 4 specific tags that likely do NOT fit other files",
-    "- avoid neutral tags: holiday, music, style, photo, model, art",
-    `- use hashtags ONLY from this allowed list: ${allowedTags
-      .slice(0, 300)
-      .join(", ")}`,
-    "- vip: boolean true/false",
-    "- for images: vip=true if content is highly nude/pornographic, else false",
-    "- for videos: vip will be calculated by code using duration only",
-    `- for videos: you receive ${VIDEO_ANALYSIS_FRAME_COUNT} sampled frames across the timeline, use all of them`,
-    "- do not use technical placeholder tags like tag, tag1, tag2",
-    "- no extra text outside JSON",
-  ].join("\n");
+  const allowedTagSet = new Set(allowedTags);
+  const framePaths =
+    mediaType === "video"
+      ? extractVideoFrames(
+          filePath,
+          videoDurationSeconds,
+          VIDEO_ANALYSIS_FRAME_COUNT
+        )
+      : [filePath];
 
-  const images = [];
-
-  if (mediaType === "image") {
-    const resizedPath = createResizedImageForAi(filePath);
-    const imageForAi = resizedPath || filePath;
-    images.push(toBase64(imageForAi));
-
-    if (resizedPath) {
-      try {
-        fs.unlinkSync(resizedPath);
-      } catch {}
-    }
+  if (!framePaths.length) {
+    throw new Error("No frames extracted for WD Tagger");
   }
 
-  if (mediaType === "video") {
-    const framePaths = extractVideoFrames(
-      filePath,
-      videoDurationSeconds,
-      VIDEO_ANALYSIS_FRAME_COUNT
-    );
+  const scoreMap = new Map();
+  const ratingMap = new Map();
+
+  try {
     for (const framePath of framePaths) {
-      images.push(toBase64(framePath));
+      const result = await runWdTaggerPredict(framePath, env);
+      for (const [tag, score] of Object.entries(result.general)) {
+        const previous = scoreMap.get(tag) || 0;
+        scoreMap.set(tag, Math.max(previous, Number(score)));
+      }
+      for (const [tag, score] of Object.entries(result.rating)) {
+        const previous = ratingMap.get(tag) || 0;
+        ratingMap.set(tag, Math.max(previous, Number(score)));
+      }
+    }
+  } finally {
+    for (const framePath of framePaths) {
+      if (framePath === filePath) continue;
       try {
         fs.unlinkSync(framePath);
       } catch {}
     }
   }
+
+  const sortedTags = [...scoreMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([tag]) => tag);
+
+  let hashtags = sortedTags.filter((tag) => allowedTagSet.has(tag));
+  if (!hashtags.length) {
+    hashtags = sortedTags;
+  }
+  hashtags = normalizeTags(hashtags);
+
+  const explicitRating = Math.max(
+    Number(ratingMap.get("explicit") || 0),
+    Number(ratingMap.get("questionable") || 0)
+  );
+  return {
+    hashtags,
+    explicitRating,
+    videoDurationSeconds: Number.isFinite(videoDurationSeconds)
+      ? Math.round(videoDurationSeconds)
+      : null,
+  };
+}
+
+async function callKeywordModel({
+  filePath,
+  mediaType,
+  env,
+  videoDurationSeconds,
+  allowedTags,
+  keywords,
+  explicitRating,
+}) {
+  const filename = path.basename(filePath);
+  const keywordList = normalizeTags(keywords || []);
+  if (!keywordList.length) {
+    throw new Error("WD Tagger returned no keywords");
+  }
+
+  const durationLine =
+    mediaType === "video" && Number.isFinite(videoDurationSeconds)
+      ? `Video duration seconds: ${Math.round(videoDurationSeconds)}.`
+      : "";
+  const allowedTagSet = new Set(allowedTags);
+
+  const prompt = [
+    `File: ${filename}. Media type: ${mediaType}.`,
+    durationLine,
+    `Keywords from WD Tagger: ${keywordList.slice(0, 80).join(", ")}.`,
+    "You are a content editor for a media platform. Build metadata using only these keywords and file context.",
+    "Return JSON only (no markdown):",
+    '{"title":"...","description":"...","hashtags":["keyword1","keyword2"]}',
+    "Rules:",
+    "- title: only English, short, up to 60 chars, sexual tone",
+    "- description: only English, 1-2 sentences, up to 220 chars, sexual tone",
+    "- emoji are allowed and recommended in title/description",
+    "- hashtags: 5-12 tags for THIS media",
+    "- each hashtag MUST be selected from WD Tagger keywords above",
+    "- do not invent tags outside WD Tagger keywords",
+    "- prioritize specific keywords over generic ones",
+    `- use hashtags ONLY from this allowed list: ${allowedTags
+      .slice(0, 300)
+      .join(", ")}`,
+    "- do not use placeholder tags like tag, tag1, tag2",
+    "- no extra text outside JSON",
+  ].join("\n");
 
   let response;
   try {
@@ -472,7 +661,6 @@ async function callVisionModel({
           {
             role: "user",
             content: prompt,
-            images,
           },
         ],
       }),
@@ -491,14 +679,16 @@ async function callVisionModel({
   const data = await response.json();
   const parsed = parseJsonFromText(data.message?.content);
 
-  const title = sanitizeEnglishText(
-    parsed.title,
-    sanitizeEnglishText(path.parse(filename).name, "Media Content")
-  );
+  const title = sanitizeEnglishText(parsed.title, titleFromTags(keywordList, filename));
   const description = sanitizeEnglishText(
     parsed.description,
-    `Sexy media content ${sanitizeEnglishText(filename, "content")}`
+    descriptionFromTags(keywordList, filename)
   );
+
+  let hashtags = keywordList.filter((tag) => allowedTagSet.has(tag));
+  if (!hashtags.length) hashtags = keywordList;
+  hashtags = normalizeTags(hashtags).slice(0, MAX_ITEM_HASHTAGS);
+
   const titleEmoji = pickEmoji(`${filename}:title`, TITLE_EMOJIS);
   const descriptionEmoji = pickEmoji(
     `${filename}:description`,
@@ -513,9 +703,18 @@ async function callVisionModel({
     isTitle: false,
     emoji: descriptionEmoji,
   });
-  const aiVip = Boolean(parsed.vip);
-  const allowedTagSet = new Set(allowedTags);
-  const hashtags = filterModelTags(parsed.hashtags || [], allowedTagSet);
+
+  if (
+    isLowQualityModelOutput({
+      title,
+      description,
+      hashtags,
+      filename,
+    })
+  ) {
+    throw new Error("Keyword model returned incomplete metadata");
+  }
+
   const durationVip =
     mediaType === "video" &&
     Number.isFinite(videoDurationSeconds) &&
@@ -526,7 +725,8 @@ async function callVisionModel({
   const explicitTextHit = EXPLICIT_VIP_KEYWORDS.test(
     `${sexyTitle} ${sexyDescription}`
   );
-  const imageVip = Boolean(aiVip && (explicitTagHit || explicitTextHit));
+  const imageVip =
+    Number(explicitRating || 0) >= 0.4 || explicitTagHit || explicitTextHit;
   const vip = mediaType === "video" ? Boolean(durationVip) : imageVip;
 
   return {
@@ -734,28 +934,55 @@ async function buildConfig(env) {
 
     let ai;
     let usedFallback = false;
-    try {
-      ai = await callVisionModel({
-        filePath: fullPath,
-        mediaType,
-        env,
-        videoDurationSeconds,
-        allowedTags,
-      });
-    } catch (err) {
+    let lastModelError = null;
+    const attempts = Math.max(1, Number(env.MODEL_RETRY_COUNT || 0) + 1);
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const wd = await callWdTaggerModel({
+          filePath: fullPath,
+          mediaType,
+          env,
+          videoDurationSeconds,
+          allowedTags,
+        });
+
+        ai = await callKeywordModel({
+          filePath: fullPath,
+          mediaType,
+          env,
+          videoDurationSeconds,
+          allowedTags,
+          keywords: wd.hashtags,
+          explicitRating: wd.explicitRating,
+        });
+
+        lastModelError = null;
+        break;
+      } catch (err) {
+        lastModelError = err;
+        if (attempt < attempts) {
+          logInfo(
+            `⚠️  Analyze retry ${attempt}/${attempts - 1} for ${file}: ${
+              err.message
+            }`
+          );
+        }
+      }
+    }
+
+    if (!ai) {
       usedFallback = true;
-      logInfo(`⚠️  AI analysis failed for ${file}: ${err.message}`);
-      const fallbackTag =
-        normalizeHashtag(path.parse(file).name.split(/[\s._-]/)[0]) || "media";
-      const durationVip =
-        mediaType === "video" &&
-        Number.isFinite(videoDurationSeconds) &&
-        videoDurationSeconds >= 120;
+      logInfo(
+        `⚠️  Analyze failed for ${file}: ${
+          lastModelError?.message || "Unknown model error"
+        }`
+      );
       ai = {
-        title: path.parse(file).name,
-        description: `Media file ${file}`,
-        hashtags: allowedTagSet.has(fallbackTag) ? [fallbackTag] : [],
-        vip: durationVip,
+        title: "",
+        description: "",
+        hashtags: [],
+        vip: false,
         videoDurationSeconds: Number.isFinite(videoDurationSeconds)
           ? Math.round(videoDurationSeconds)
           : null,
@@ -823,6 +1050,7 @@ async function buildConfig(env) {
 async function main() {
   loadDotEnv();
   const env = getEnv();
+  console.log("🔧 Analyze pipeline: wd_tagger -> keyword_model");
 
   const config = await buildConfig(env);
 

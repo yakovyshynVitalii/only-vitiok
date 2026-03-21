@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 describe("POST /api/media/scan", () => {
-  test("synchronizes cards from files in media folder", async () => {
+  test("synchronizes cards and marks videos for reanalysis", async () => {
     const tmp = makeTempDir();
     tempDirs.push(tmp);
     const mediaDir = path.join(tmp, "media");
@@ -75,10 +75,11 @@ describe("POST /api/media/scan", () => {
     expect(cfg.items).toHaveLength(2);
     expect(cfg.items[0]).toMatchObject({
       fileName: "a.mp4",
-      title: "Existing title",
-      hashtags: ["tag-a"],
-      vip: true,
-      uploaded: true,
+      title: "",
+      description: "",
+      hashtags: [],
+      vip: false,
+      uploaded: false,
     });
     expect(cfg.items[1]).toMatchObject({
       fileName: "z.jpg",
