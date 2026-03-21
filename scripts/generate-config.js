@@ -688,7 +688,13 @@ async function analyzeWithVision({
   const prompt = `Adult content SEO analyst. Analyze this ${mediaType} frame.${durationInfo}
 
 Describe what you SEE: body parts, actions, nudity level, setting.
-"vip"=true ONLY if naked pussy/vagina is CLEARLY visible and uncovered. Strict: when in doubt, false.
+
+VIP RULE (IMPORTANT): Set "vip" to true if ANY of these are visible:
+- Naked pussy/vagina (uncovered, no panties)
+- Fully nude woman (no clothes at all)
+- Naked breasts/boobs clearly visible (no bra, no covering)
+If the person is wearing clothes, lingerie that covers, or body parts are hidden — vip=false.
+Most adult content IS vip. When you see nudity, set vip=true.
 
 Title (max 60 chars): specific action/body focus, 1 emoji at end, English. NO filename "${filename}", NO generic words (sexy/hot/video/content).
 Description (max 200 chars): enticing, specific, 1 emoji, English.
@@ -697,7 +703,7 @@ Trending terms from adult sites: ${trendTermsList}
 Pick 1-5 matching terms. Rate relevance 0-100.
 
 JSON only:
-{"title":"...","description":"...","hashtags":[],"vip":false,"trendTerms":[],"trendScore":0,"contentSummary":"what you see"}`;
+{"title":"...","description":"...","hashtags":[],"vip":true,"trendTerms":[],"trendScore":0,"contentSummary":"what you see"}`;
 
   let response;
   try {
@@ -829,9 +835,16 @@ async function buildConfig(env) {
     .filter((f) => fs.statSync(path.join(env.MEDIA_FOLDER, f)).isFile())
     .sort((a, b) => a.localeCompare(b));
 
-  const files = allFiles.filter(
-    (file) => !file.startsWith(".") && isSupportedMedia(file)
-  );
+  const MAX_FILE_SIZE = 1 * 1024 * 1024 * 1024; // 1 GB
+  const files = allFiles.filter((file) => {
+    if (file.startsWith(".") || !isSupportedMedia(file)) return false;
+    const size = fs.statSync(path.join(env.MEDIA_FOLDER, file)).size;
+    if (size > MAX_FILE_SIZE) {
+      console.log(`⚠️  Skipping ${file} — too large (${(size / (1024 * 1024)).toFixed(0)} MB > 1 GB)`);
+      return false;
+    }
+    return true;
+  });
 
   if (!files.length) {
     throw new Error(`No supported media files found in ${env.MEDIA_FOLDER}`);
@@ -1053,7 +1066,7 @@ async function buildConfig(env) {
             `   📈 Trends: ${trendTerms.join(", ")} (score: ${scoreLabel})`
           );
         }
-        logInfo(`   ${ai.vip ? "🔞 VIP: YES (pussy visible)" : "✅ VIP: no"}`);
+        logInfo(`   ${ai.vip ? "🔞 VIP: YES (nude content)" : "✅ VIP: no"}`);
 
         lastModelError = null;
         break;

@@ -286,8 +286,9 @@ async function runUploadOnce() {
   let retryRequested = false;
   let lastErrorMessage = "";
 
-  await page.goto(env.CREATE_URL, { waitUntil: "networkidle" });
-  await page.waitForTimeout(1500);
+  await page.goto(env.CREATE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForLoadState("networkidle").catch(() => {});
+  await page.waitForTimeout(2000);
 
   for (const item of pendingItems) {
     const filePath = item.filePath;
@@ -296,6 +297,17 @@ async function runUploadOnce() {
       console.log(`⚠️  File is missing, skipping: ${filePath}`);
       item.uploaded = true;
       item.error = "file_missing";
+      writeConfig(config, env);
+      continue;
+    }
+
+    const fileSizeBytes = fs.statSync(filePath).size;
+    const MAX_FILE_SIZE = 900 * 1024 * 1024; // 900 MB — platform limit is 1 GB, keep margin
+    if (fileSizeBytes > MAX_FILE_SIZE) {
+      const sizeMB = (fileSizeBytes / (1024 * 1024)).toFixed(0);
+      console.log(`⚠️  File too large (${sizeMB} MB > 1 GB), skipping: ${path.basename(filePath)}`);
+      item.uploaded = true;
+      item.error = `file_too_large_${sizeMB}MB`;
       writeConfig(config, env);
       continue;
     }
