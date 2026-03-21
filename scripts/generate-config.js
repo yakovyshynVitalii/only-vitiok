@@ -11,6 +11,27 @@ const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵", "🍑", "👅", "�
 const DESCRIPTION_EMOJIS = [
   "💦", "🌶", "🖤", "💞", "🔞", "🍒", "🍓", "😮‍💨", "🤤",
 ];
+const TITLE_STYLE_GUIDES = [
+  "confession style: start with I / I'm / I just and mention the specific mood or action",
+  "invitation style: use a playful invite tied to the visible scene, not a generic tease",
+  "reveal style: hint at the exact outfit, pose, body part, or action that is visible",
+  "setting style: mention the location or situation if it is clearly visible",
+  "question style: ask one teasing question based on the actual scene",
+  "bratty one-liner style: short, bold, cocky, and scene-specific",
+];
+const BANNED_TITLE_PHRASES = [
+  "come see what's under my",
+  "just got out of the shower",
+  "i can't stop touching myself",
+];
+const TITLE_DUPLICATE_FALLBACKS = [
+  "Take a closer look at me",
+  "I'm teasing you on purpose",
+  "You know you want more",
+  "I'm in such a naughty mood",
+  "Wanna get a little closer",
+  "I've been waiting for you",
+];
 const IMAGE_EXTENSIONS = new Set([
   ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp",
 ]);
@@ -445,12 +466,21 @@ function createProgressBar(percent, width = 24) {
 }
 
 function pickEmoji(seed, pool) {
-  const source = String(seed || "default");
+  return pickFromPool(seed, pool);
+}
+
+function hashSeed(value) {
+  const source = String(value || "default");
   let hash = 0;
   for (let i = 0; i < source.length; i += 1) {
     hash = (hash * 31 + source.charCodeAt(i)) % 2147483647;
   }
-  return pool[Math.abs(hash) % pool.length];
+  return Math.abs(hash);
+}
+
+function pickFromPool(seed, pool) {
+  if (!Array.isArray(pool) || pool.length === 0) return "";
+  return pool[hashSeed(seed) % pool.length];
 }
 
 function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
@@ -464,6 +494,71 @@ function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
     base
   );
   return hasEmoji ? base : `${base} ${emoji}`;
+}
+
+function truncateText(text, maxLength = 60) {
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd() + "…";
+}
+
+function normalizeTitleForComparison(title) {
+  return String(title || "")
+    .toLowerCase()
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleUsesBannedTemplate(title) {
+  const normalized = normalizeTitleForComparison(title);
+  return BANNED_TITLE_PHRASES.some((phrase) => normalized.includes(phrase));
+}
+
+function buildTitleCandidateFromDescription(description) {
+  const cleaned = sanitizeEnglishText(description, "")
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, " ")
+    .trim();
+  if (!cleaned) return "";
+
+  const clauses = cleaned
+    .split(/(?:\.\.\.|[.!?]|,|;|:)/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 12);
+
+  return truncateText(clauses[0] || cleaned, 52);
+}
+
+function finalizeTitleCandidate(title, { emoji }) {
+  const sanitized = sanitizeEnglishText(title, "");
+  const cleaned = removeOverusedTitleWords(sanitized, "");
+  const truncated = truncateText(cleaned, 56);
+  return enforceSexyTone(truncated, { isTitle: true, emoji });
+}
+
+function ensureUniqueGeneratedTitle({ title, description, fileName }, usedTitles) {
+  const emoji = pickEmoji(`${fileName}:title`, TITLE_EMOJIS);
+  const candidates = [
+    title,
+    buildTitleCandidateFromDescription(description),
+    pickFromPool(`${fileName}:title-fallback`, TITLE_DUPLICATE_FALLBACKS),
+  ];
+
+  for (const candidate of candidates) {
+    const finalized = finalizeTitleCandidate(candidate, { emoji });
+    const normalized = normalizeTitleForComparison(finalized);
+    if (!normalized) continue;
+    if (usedTitles.has(normalized)) continue;
+    if (titleUsesBannedTemplate(finalized)) continue;
+    return finalized;
+  }
+
+  const lastResort = finalizeTitleCandidate(
+    `${pickFromPool(`${fileName}:title-fallback`, TITLE_DUPLICATE_FALLBACKS)} tonight`,
+    { emoji }
+  );
+  return lastResort;
 }
 
 function detectMediaType(filePath) {
@@ -680,6 +775,7 @@ async function analyzeWithVision({
 
   const allowedTagsList = allowedTags.join(", ");
   const trendTermsList = (trendingTerms || []).join(", ");
+  const titleStyleGuide = pickFromPool(`${filename}:title-style`, TITLE_STYLE_GUIDES);
   const durationInfo =
     mediaType === "video" && Number.isFinite(videoDurationSeconds)
       ? `\nVideo duration: ${Math.round(videoDurationSeconds)} seconds.`
@@ -689,15 +785,23 @@ async function analyzeWithVision({
 
 Describe what you SEE: body parts, actions, nudity level, setting.
 
-VIP RULE (IMPORTANT): Set "vip" to true if ANY of these are visible:
+VIP RULE (IMPORTANT): Set "vip" to true ONLY if at least one of these is clearly visible:
 - Naked pussy/vagina (uncovered, no panties)
-- Fully nude woman (no clothes at all)
-- Naked breasts/boobs clearly visible (no bra, no covering)
-If the person is wearing clothes, lingerie that covers, or body parts are hidden — vip=false.
-Most adult content IS vip. When you see nudity, set vip=true.
+- Naked breasts/boobs with nipples visible (no bra or covering)
+- No panties / bare crotch clearly visible
+Otherwise vip=false.
+Examples of vip=false: bra on, panties on, lingerie/swimsuit that still covers nipples or pussy, hands/pose/angle covering intimate parts, sideboob/cleavage only, implied nudity, transparent clothes without clear direct visibility.
 
-Title (max 60 chars): specific action/body focus, 1 emoji at end, English. NO filename "${filename}", NO generic words (sexy/hot/video/content).
-Description (max 200 chars): enticing, specific, 1 emoji, English.
+Title (max 60 chars): Write as if the GIRL HERSELF is posting this. First person, flirty, teasing tone. 1 emoji at end, English.
+Make it scene-specific and fresh, based on what is actually visible. Mention the real action, pose, setting, outfit, or body part if relevant.
+Use this title approach for THIS file: ${titleStyleGuide}
+Avoid generic titles that could fit any file.
+Never use these exact phrases: "Come see what's under my...", "Just got out of the shower...", "I can't stop touching myself..."
+NO filename "${filename}", NO generic/boring words (sexy/hot/video/content/showcase).
+
+Description (max 200 chars): Also first person from the girl's perspective. Teasing, inviting the viewer. 1 emoji, English.
+Keep it specific to the visible scene. Do not reuse the title wording.
+
 Hashtags: pick 5-12 ONLY from: ${allowedTagsList}
 Trending terms from adult sites: ${trendTermsList}
 Pick 1-5 matching terms. Rate relevance 0-100.
@@ -714,7 +818,11 @@ JSON only:
         model: env.OLLAMA_MODEL,
         format: "json",
         stream: false,
-        options: { temperature: 0.4, num_predict: 512 },
+        options: {
+          temperature: 0.75,
+          repeat_penalty: 1.15,
+          num_predict: 512,
+        },
         messages: [
           {
             role: "user",
@@ -938,6 +1046,13 @@ async function buildConfig(env) {
     }
   }
 
+  const usedGeneratedTitles = new Set(
+    items
+      .filter((item, index) => completedMap[index])
+      .map((item) => normalizeTitleForComparison(item.title))
+      .filter(Boolean)
+  );
+
   function clearProgressLine() {
     if (!process.stdout.isTTY) return;
     process.stdout.write(`\r${" ".repeat(lastProgressLineLength)}\r`);
@@ -1066,7 +1181,7 @@ async function buildConfig(env) {
             `   📈 Trends: ${trendTerms.join(", ")} (score: ${scoreLabel})`
           );
         }
-        logInfo(`   ${ai.vip ? "🔞 VIP: YES (nude content)" : "✅ VIP: no"}`);
+        logInfo(`   ${ai.vip ? "🔞 VIP: YES (explicit nudity)" : "✅ VIP: no"}`);
 
         lastModelError = null;
         break;
@@ -1138,7 +1253,7 @@ async function buildConfig(env) {
 
       const current = items[index];
       current.mediaType = result.mediaType;
-      current.title = result.title;
+      current.title = ensureUniqueGeneratedTitle(result, usedGeneratedTitles);
       current.description = result.description;
       current.hashtags = result.hashtags;
       current.trendTermsUsed = result.trendTermsUsed || [];
@@ -1146,6 +1261,11 @@ async function buildConfig(env) {
       current.vip = Boolean(result.vip);
       current.videoDurationSeconds = result.videoDurationSeconds;
       current.uploaded = false;
+
+      const normalizedTitle = normalizeTitleForComparison(current.title);
+      if (normalizedTitle) {
+        usedGeneratedTitles.add(normalizedTitle);
+      }
 
       completedMap[index] = true;
       completed += 1;

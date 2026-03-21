@@ -76,6 +76,11 @@ const isConfigDrawerOpen = ref(false);
 const isLogsDrawerOpen = ref(false);
 const canResumeAnalyze = ref(false);
 
+const collectionModelName = ref("");
+const collectionGenTitle = ref("");
+const collectionGenDescription = ref("");
+const isGeneratingCollection = ref(false);
+
 const newEnvKey = ref("");
 const newEnvValue = ref("");
 const lastPickedFiles = ref(0);
@@ -707,6 +712,55 @@ function startAnalyzeLiveSync() {
   }, 1500);
 }
 
+async function generateCollectionMeta() {
+  const name = collectionModelName.value.trim();
+  if (!name) {
+    setError("Enter a model name first");
+    return;
+  }
+
+  isGeneratingCollection.value = true;
+  collectionGenTitle.value = "";
+  collectionGenDescription.value = "";
+  infoMessage.value = "";
+  errorMessage.value = "";
+
+  try {
+    const res = await $fetch<{ ok: boolean; title: string; description: string }>("/api/run/generate-collection", {
+      method: "POST",
+      body: { modelName: name },
+    });
+    collectionGenTitle.value = res.title;
+    collectionGenDescription.value = res.description;
+    setMessage(`Collection meta generated for "${name}"`);
+  } catch (err: unknown) {
+    setError(err instanceof Error ? err.message : String(err));
+  } finally {
+    isGeneratingCollection.value = false;
+  }
+}
+
+async function copyCollectionMeta() {
+  const title = collectionGenTitle.value.trim();
+  const description = collectionGenDescription.value.trim();
+
+  if (!title && !description) {
+    setError("Nothing to copy yet");
+    return;
+  }
+
+  const text = [`Title: ${title}`, `Description: ${description}`]
+    .filter((line) => !line.endsWith(": "))
+    .join("\n");
+
+  try {
+    await navigator.clipboard.writeText(text);
+    setMessage("Collection title and description copied");
+  } catch (error) {
+    setError(extractErrorMessage(error) || "Clipboard access failed");
+  }
+}
+
 async function startAnalyze() {
   canResumeAnalyze.value = false;
   isRunningAnalyze.value = true;
@@ -984,6 +1038,58 @@ onBeforeUnmount(() => {
               <UBadge color="neutral" variant="soft">{{ loginStatusText }}</UBadge>
               <UBadge color="primary" variant="soft">Files in media: {{ mediaFiles.length }}</UBadge>
               <UBadge color="neutral" variant="soft">Env keys: {{ envKeys.length }}</UBadge>
+            </div>
+          </UCard>
+          <UCard class="surface-card">
+            <template #header>
+              <div class="section-title">
+                <h2>📝 Collection Meta</h2>
+              </div>
+            </template>
+
+            <div class="stack-md">
+              <div>
+                <p class="field-label">Model name / nickname</p>
+                <div class="create-url-row">
+                  <UInput
+                    v-model="collectionModelName"
+                    class="create-url-field"
+                    size="lg"
+                    icon="i-lucide-user"
+                    placeholder="Selti | Seltin_sweety"
+                  />
+                  <UButton
+                    color="primary"
+                    size="lg"
+                    icon="i-lucide-sparkles"
+                    :loading="isGeneratingCollection"
+                    :disabled="isGeneratingCollection || !collectionModelName.trim()"
+                    @click="generateCollectionMeta"
+                  >
+                    Generate
+                  </UButton>
+                </div>
+              </div>
+
+              <div v-if="collectionGenTitle" class="collection-gen-result">
+                <div class="collection-gen-field">
+                  <p class="field-label">Title</p>
+                  <div class="collection-gen-text">{{ collectionGenTitle }}</div>
+                </div>
+                <div class="collection-gen-field">
+                  <p class="field-label">Description</p>
+                  <div class="collection-gen-text">{{ collectionGenDescription }}</div>
+                </div>
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="soft"
+                  icon="i-lucide-copy"
+                  @click="copyCollectionMeta"
+                >
+                  Copy both
+                </UButton>
+              </div>
             </div>
           </UCard>
         </aside>
@@ -1803,6 +1909,27 @@ onBeforeUnmount(() => {
   border: 1px solid color-mix(in srgb, var(--ui-color-info) 20%, transparent);
   font-size: 0.8rem;
   line-height: 1.4;
+}
+
+.collection-gen-result {
+  display: grid;
+  gap: 10px;
+}
+
+.collection-gen-field {
+  display: grid;
+  gap: 4px;
+}
+
+.collection-gen-text {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--ui-bg-muted);
+  border: 1px solid var(--ui-border);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  user-select: all;
+  word-break: break-word;
 }
 
 .summary-label {
