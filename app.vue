@@ -68,6 +68,7 @@ const isStoppingAnalyze = ref(false);
 const isDragOver = ref(false);
 const isSettingsOpen = ref(false);
 const isClearingMedia = ref(false);
+const isScanningMedia = ref(false);
 const isConfigDrawerOpen = ref(false);
 const isLogsDrawerOpen = ref(false);
 const canResumeAnalyze = ref(false);
@@ -302,6 +303,12 @@ function getItemExt(item: ConfigItem): string {
   return idx >= 0 ? fileName.slice(idx) : "";
 }
 
+function getFileExt(fileName: string): string {
+  const normalized = String(fileName || "").toLowerCase();
+  const idx = normalized.lastIndexOf(".");
+  return idx >= 0 ? normalized.slice(idx) : "";
+}
+
 function isImageItem(item: ConfigItem): boolean {
   return IMAGE_EXTENSIONS.has(getItemExt(item));
 }
@@ -462,6 +469,34 @@ async function handleLoginButton() {
 async function loadMedia() {
   const media = await $fetch<MediaResponse>("/api/media");
   mediaFiles.value = media.files;
+  return media;
+}
+
+async function scanMedia() {
+  isScanningMedia.value = true;
+
+  try {
+    const scanned = await $fetch<{
+      files: string[];
+      count: number;
+      itemCount: number;
+    }>("/api/media/scan", {
+      method: "POST",
+    });
+    mediaFiles.value = scanned.files;
+    await loadConfig();
+
+    const videoCount = scanned.files.filter((file) =>
+      VIDEO_EXTENSIONS.has(getFileExt(file))
+    ).length;
+    setMessage(
+      `Scan completed: ${scanned.count} media file(s), ${videoCount} video file(s), ${scanned.itemCount} card(s).`
+    );
+  } catch (error) {
+    setError(error);
+  } finally {
+    isScanningMedia.value = false;
+  }
 }
 
 async function uploadMediaFiles(files: File[]) {
@@ -973,6 +1008,16 @@ onBeforeUnmount(() => {
                 <h2>Media Dropzone</h2>
                 <div class="media-header-actions">
                   <UBadge color="neutral" variant="soft">{{ configItems.length }} cards</UBadge>
+                  <UButton
+                    color="primary"
+                    variant="soft"
+                    size="sm"
+                    icon="i-lucide-scan-search"
+                    :loading="isScanningMedia"
+                    @click="scanMedia"
+                  >
+                    Scan media
+                  </UButton>
                   <UButton
                     color="error"
                     variant="soft"
