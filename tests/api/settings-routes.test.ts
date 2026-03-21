@@ -22,7 +22,7 @@ vi.mock("~/server/utils/settings", () => ({
 describe("settings routes", () => {
   test("GET /api/settings returns readSettings result", async () => {
     mocks.readSettings.mockReturnValue({ env: { BASE_URL: "x" } });
-    const handler = (await import("~/server/api/settings.get")).default;
+    const handler = (await import("../../server/api/settings.get")).default;
     const event = {} as Parameters<typeof handler>[0];
 
     const result = handler(event);
@@ -31,7 +31,7 @@ describe("settings routes", () => {
 
   test("PUT /api/settings validates env object", async () => {
     mocks.readBody.mockResolvedValue({ env: "bad" });
-    const handler = (await import("~/server/api/settings.put")).default;
+    const handler = (await import("../../server/api/settings.put")).default;
     const event = {} as Parameters<typeof handler>[0];
 
     await expect(handler(event)).rejects.toMatchObject({
@@ -50,7 +50,7 @@ describe("settings routes", () => {
     });
     mocks.writeSettings.mockReturnValue({ ok: true });
 
-    const handler = (await import("~/server/api/settings.put")).default;
+    const handler = (await import("../../server/api/settings.put")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 

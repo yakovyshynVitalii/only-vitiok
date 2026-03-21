@@ -39,7 +39,7 @@ describe("config routes", () => {
     mocks.readSettings.mockReturnValue({});
     mocks.getConfigPath.mockReturnValue(configPath);
 
-    const handler = (await import("~/server/api/config.get")).default;
+    const handler = (await import("../../server/api/config.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 
@@ -60,7 +60,7 @@ describe("config routes", () => {
     mocks.readSettings.mockReturnValue({});
     mocks.getConfigPath.mockReturnValue(configPath);
 
-    const handler = (await import("~/server/api/config.get")).default;
+    const handler = (await import("../../server/api/config.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 
@@ -70,7 +70,7 @@ describe("config routes", () => {
   });
 
   test("PUT /api/config validates text and JSON format", async () => {
-    const handler = (await import("~/server/api/config.put")).default;
+    const handler = (await import("../../server/api/config.put")).default;
     const event = {} as Parameters<typeof handler>[0];
 
     mocks.readBody.mockResolvedValue({ text: "" });
@@ -93,7 +93,7 @@ describe("config routes", () => {
     mocks.readSettings.mockReturnValue({});
     mocks.getConfigPath.mockReturnValue(configPath);
 
-    const handler = (await import("~/server/api/config.put")).default;
+    const handler = (await import("../../server/api/config.put")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 

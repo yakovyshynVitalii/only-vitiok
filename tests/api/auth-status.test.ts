@@ -29,7 +29,7 @@ describe("GET /api/auth/status", () => {
     mocks.isLoginSessionActive.mockReturnValue(true);
     mocks.getLoginSessionMeta.mockReturnValue({ startedAt: "x" });
 
-    const handler = (await import("~/server/api/auth/status.get")).default;
+    const handler = (await import("../../server/api/auth/status.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 

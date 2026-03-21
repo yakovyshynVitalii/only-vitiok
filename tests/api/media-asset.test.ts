@@ -52,7 +52,7 @@ afterEach(() => {
 describe("GET /api/media/asset", () => {
   test("validates query file param", async () => {
     mocks.getQuery.mockReturnValue({});
-    const handler = (await import("~/server/api/media/asset.get")).default;
+    const handler = (await import("../../server/api/media/asset.get")).default;
     const event = {} as Parameters<typeof handler>[0];
 
     expect(() => handler(event)).toThrowError(/Pass file in query/);
@@ -68,7 +68,7 @@ describe("GET /api/media/asset", () => {
     mocks.readSettings.mockReturnValue({});
     mocks.ensureMediaFolder.mockReturnValue(mediaDir);
 
-    const handler = (await import("~/server/api/media/asset.get")).default;
+    const handler = (await import("../../server/api/media/asset.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     expect(() => handler(event)).toThrowError(/File not found/);
   });
@@ -85,7 +85,7 @@ describe("GET /api/media/asset", () => {
     mocks.ensureMediaFolder.mockReturnValue(mediaDir);
     mocks.sendStream.mockImplementation((_event, stream) => stream);
 
-    const handler = (await import("~/server/api/media/asset.get")).default;
+    const handler = (await import("../../server/api/media/asset.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 

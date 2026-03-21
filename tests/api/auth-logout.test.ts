@@ -23,7 +23,7 @@ describe("POST /api/auth/logout", () => {
     mocks.isLoginSessionActive.mockReturnValue(true);
     mocks.rm.mockResolvedValue(undefined);
 
-    const handler = (await import("~/server/api/auth/logout.post")).default;
+    const handler = (await import("../../server/api/auth/logout.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 
@@ -42,7 +42,7 @@ describe("POST /api/auth/logout", () => {
     mocks.isLoginSessionActive.mockReturnValue(false);
     mocks.rm.mockRejectedValue(new Error("no access"));
 
-    const handler = (await import("~/server/api/auth/logout.post")).default;
+    const handler = (await import("../../server/api/auth/logout.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 

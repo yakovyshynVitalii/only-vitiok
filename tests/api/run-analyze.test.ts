@@ -43,7 +43,7 @@ describe("POST /api/run/analyze", () => {
     mocks.stopOllamaModel.mockResolvedValue({ logs: ["model-stopped"] });
     mocks.stopOllamaServe.mockResolvedValue({ logs: ["serve-stopped"] });
 
-    const handler = (await import("~/server/api/run/analyze.post")).default;
+    const handler = (await import("../../server/api/run/analyze.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 
@@ -79,7 +79,7 @@ describe("POST /api/run/analyze", () => {
     mocks.stopOllamaModel.mockResolvedValue({ logs: [] });
     mocks.stopOllamaServe.mockResolvedValue({ logs: [] });
 
-    const handler = (await import("~/server/api/run/analyze.post")).default;
+    const handler = (await import("../../server/api/run/analyze.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 
@@ -121,7 +121,7 @@ describe("POST /api/run/analyze", () => {
     mocks.stopOllamaModel.mockResolvedValue({ logs: [] });
     mocks.stopOllamaServe.mockResolvedValue({ logs: [] });
 
-    const handler = (await import("~/server/api/run/analyze.post")).default;
+    const handler = (await import("../../server/api/run/analyze.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     await expect(handler(event)).rejects.toThrow("analyze-failed");
 

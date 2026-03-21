@@ -28,7 +28,7 @@ vi.mock("~/server/utils/settings", () => ({
 describe("POST /api/auth/login-start", () => {
   test("returns already logged in when state exists", async () => {
     mocks.existsSync.mockReturnValue(true);
-    const handler = (await import("~/server/api/auth/login-start.post")).default;
+    const handler = (await import("../../server/api/auth/login-start.post")).default;
     const event = {} as Parameters<typeof handler>[0];
 
     const result = await handler(event);
@@ -43,7 +43,7 @@ describe("POST /api/auth/login-start", () => {
     mocks.isLoginSessionActive.mockReturnValue(true);
     mocks.getLoginSessionMeta.mockReturnValue({ startedAt: "now" });
 
-    const handler = (await import("~/server/api/auth/login-start.post")).default;
+    const handler = (await import("../../server/api/auth/login-start.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 
@@ -59,7 +59,7 @@ describe("POST /api/auth/login-start", () => {
     mocks.isLoginSessionActive.mockReturnValue(false);
     mocks.readSettings.mockReturnValue({ env: { BASE_URL: "" } });
 
-    const handler = (await import("~/server/api/auth/login-start.post")).default;
+    const handler = (await import("../../server/api/auth/login-start.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     await expect(handler(event)).rejects.toMatchObject({
       cause: {
@@ -77,7 +77,7 @@ describe("POST /api/auth/login-start", () => {
     });
     mocks.getLoginSessionMeta.mockReturnValue({ startedAt: "t1" });
 
-    const handler = (await import("~/server/api/auth/login-start.post")).default;
+    const handler = (await import("../../server/api/auth/login-start.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 

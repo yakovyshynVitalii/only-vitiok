@@ -35,7 +35,7 @@ afterEach(() => {
 describe("POST /api/media/upload", () => {
   test("throws when multipart payload is empty", async () => {
     mocks.readMultipartFormData.mockResolvedValue([]);
-    const handler = (await import("~/server/api/media/upload.post")).default;
+    const handler = (await import("../../server/api/media/upload.post")).default;
     const event = {} as Parameters<typeof handler>[0];
 
     await expect(handler(event)).rejects.toMatchObject({
@@ -82,7 +82,7 @@ describe("POST /api/media/upload", () => {
       },
     ]);
 
-    const handler = (await import("~/server/api/media/upload.post")).default;
+    const handler = (await import("../../server/api/media/upload.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 

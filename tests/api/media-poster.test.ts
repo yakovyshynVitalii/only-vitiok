@@ -65,7 +65,7 @@ afterEach(() => {
 describe("GET /api/media/poster", () => {
   test("rejects non-video files", async () => {
     mocks.getQuery.mockReturnValue({ file: "a.jpg" });
-    const handler = (await import("~/server/api/media/poster.get")).default;
+    const handler = (await import("../../server/api/media/poster.get")).default;
     const event = {} as Parameters<typeof handler>[0];
 
     expect(() => handler(event)).toThrowError(/only for video files/);
@@ -87,7 +87,7 @@ describe("GET /api/media/poster", () => {
       return { status: 1 };
     });
 
-    const handler = (await import("~/server/api/media/poster.get")).default;
+    const handler = (await import("../../server/api/media/poster.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     expect(() => handler(event)).toThrowError(/ffmpeg is not installed/);
   });
@@ -113,7 +113,7 @@ describe("GET /api/media/poster", () => {
       return { status: 0 };
     });
 
-    const handler = (await import("~/server/api/media/poster.get")).default;
+    const handler = (await import("../../server/api/media/poster.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 

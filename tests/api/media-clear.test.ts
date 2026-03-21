@@ -38,7 +38,7 @@ describe("DELETE /api/media/clear", () => {
     mocks.ensureMediaFolder.mockReturnValue(mediaDir);
     mocks.getConfigPath.mockReturnValue(configPath);
 
-    const handler = (await import("~/server/api/media/clear.delete")).default;
+    const handler = (await import("../../server/api/media/clear.delete")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 

@@ -15,7 +15,7 @@ describe("POST /api/run/stop", () => {
       runningTask: null,
     });
 
-    const handler = (await import("~/server/api/run/stop.post")).default;
+    const handler = (await import("../../server/api/run/stop.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 
@@ -31,7 +31,7 @@ describe("POST /api/run/stop", () => {
       runningTask: "analyze",
     });
 
-    const handler = (await import("~/server/api/run/stop.post")).default;
+    const handler = (await import("../../server/api/run/stop.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 

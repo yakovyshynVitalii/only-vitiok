@@ -23,7 +23,7 @@ describe("POST /api/auth/login-finish", () => {
     mocks.existsSync.mockReturnValue(true);
     mocks.isLoginSessionActive.mockReturnValue(false);
 
-    const handler = (await import("~/server/api/auth/login-finish.post")).default;
+    const handler = (await import("../../server/api/auth/login-finish.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 
@@ -37,7 +37,7 @@ describe("POST /api/auth/login-finish", () => {
     mocks.existsSync.mockReturnValue(false);
     mocks.isLoginSessionActive.mockReturnValue(false);
 
-    const handler = (await import("~/server/api/auth/login-finish.post")).default;
+    const handler = (await import("../../server/api/auth/login-finish.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     await expect(handler(event)).rejects.toMatchObject({
       statusCode: 409,
@@ -50,7 +50,7 @@ describe("POST /api/auth/login-finish", () => {
       .mockReturnValueOnce(true); // after finish
     mocks.isLoginSessionActive.mockReturnValue(true);
 
-    const handler = (await import("~/server/api/auth/login-finish.post")).default;
+    const handler = (await import("../../server/api/auth/login-finish.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 

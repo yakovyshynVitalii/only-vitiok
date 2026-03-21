@@ -15,7 +15,7 @@ describe("GET /api/run/status", () => {
       isBusy: true,
     });
 
-    const handler = (await import("~/server/api/run/status.get")).default;
+    const handler = (await import("../../server/api/run/status.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     expect(handler(event)).toEqual({
       runningTask: "analyze",

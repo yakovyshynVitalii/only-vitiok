@@ -34,7 +34,7 @@ describe("GET /api/media", () => {
     mocks.readSettings.mockReturnValue({});
     mocks.ensureMediaFolder.mockReturnValue(mediaDir);
 
-    const handler = (await import("~/server/api/media.get")).default;
+    const handler = (await import("../../server/api/media.get")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = handler(event);
 
