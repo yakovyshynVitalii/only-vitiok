@@ -1000,6 +1000,8 @@ async function buildConfig(env) {
           ? Math.round(existing.videoDurationSeconds)
           : null,
         uploaded: Boolean(existing.uploaded),
+        analysisAttempted:
+          Boolean(existing.analysisAttempted) || isItemAnalyzed(existing),
       };
     }
 
@@ -1013,6 +1015,7 @@ async function buildConfig(env) {
       vip: false,
       videoDurationSeconds: null,
       uploaded: false,
+      analysisAttempted: false,
     };
   });
 
@@ -1042,6 +1045,7 @@ async function buildConfig(env) {
   for (let index = 0; index < items.length; index += 1) {
     if (isItemAnalyzed(items[index])) {
       completedMap[index] = true;
+      items[index].analysisAttempted = true;
       completed += 1;
     }
   }
@@ -1225,6 +1229,7 @@ async function buildConfig(env) {
       vip: Boolean(ai.vip),
       videoDurationSeconds: ai.videoDurationSeconds,
       uploaded: false,
+      analysisAttempted: true,
       usedFallback,
     };
   }
@@ -1261,6 +1266,7 @@ async function buildConfig(env) {
       current.vip = Boolean(result.vip);
       current.videoDurationSeconds = result.videoDurationSeconds;
       current.uploaded = false;
+      current.analysisAttempted = Boolean(result.analysisAttempted);
 
       const normalizedTitle = normalizeTitleForComparison(current.title);
       if (normalizedTitle) {
