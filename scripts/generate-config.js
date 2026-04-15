@@ -32,6 +32,22 @@ const TITLE_DUPLICATE_FALLBACKS = [
   "Wanna get a little closer",
   "I've been waiting for you",
 ];
+const DESCRIPTION_LEAK_PHRASES = [
+  "Just a little leak for you",
+  "I'm giving you a teasing leak",
+  "This is only a tiny leak of what's next",
+  "These naughty leaks are just the start",
+];
+const PRIORITY_TRIGGER_TAGS = [
+  "hot",
+  "sexy",
+  "boobs",
+  "bigtits",
+  "ass",
+  "pussy",
+  "solo",
+  "nude",
+];
 const IMAGE_EXTENSIONS = new Set([
   ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp",
 ]);
@@ -61,9 +77,9 @@ const FALLBACK_TREND_TERMS = [
 let trendingTermsCache = null;
 
 const DEFAULT_SEXY_TAGS = [
-  "sexy", "sensual", "lingerie", "erotic", "seductive", "intimate",
+  "hot", "sexy", "sensual", "lingerie", "erotic", "seductive", "intimate",
   "alluring", "provocative", "adult", "glamour", "tempting", "passion",
-  "romantic", "nightwear", "bodysuit", "boobs", "ass", "blowjob",
+  "romantic", "nightwear", "bodysuit", "boobs", "big tits", "ass", "blowjob",
   "strapon", "oral", "hardcore", "nsfw", "fetish", "nude", "pussy",
   "sex", "twogirl", "lesbian", "milf", "dildo",
 ];
@@ -398,6 +414,25 @@ function normalizeTags(tags) {
   return out;
 }
 
+function sortTagsByPriority(tags) {
+  const priorityIndex = new Map(
+    PRIORITY_TRIGGER_TAGS.map((tag, index) => [normalizeHashtag(tag), index])
+  );
+
+  return [...new Set(tags)].sort((a, b) => {
+    const normalizedA = normalizeHashtag(a);
+    const normalizedB = normalizeHashtag(b);
+    const priorityA = priorityIndex.get(normalizedA);
+    const priorityB = priorityIndex.get(normalizedB);
+
+    if (priorityA != null && priorityB != null) return priorityA - priorityB;
+    if (priorityA != null) return -1;
+    if (priorityB != null) return 1;
+
+    return normalizedA.localeCompare(normalizedB);
+  });
+}
+
 function loadAllowedTags(filePath) {
   if (!fs.existsSync(filePath)) {
     throw new Error(`Tag categories file not found: ${filePath}`);
@@ -494,6 +529,23 @@ function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
     base
   );
   return hasEmoji ? base : `${base} ${emoji}`;
+}
+
+function maybeAddLeakWording(
+  text,
+  { seed, maxLength = 200, chanceDivisor = 6 } = {}
+) {
+  const base = String(text || "").replace(/\s+/g, " ").trim();
+  if (!base) return base;
+  if (/\bleaks?\b/i.test(base)) return base;
+  if (hashSeed(`${seed}:description-leak`) % chanceDivisor !== 0) return base;
+
+  const leakPhrase = pickFromPool(`${seed}:description-leak-phrase`, DESCRIPTION_LEAK_PHRASES);
+  if (!leakPhrase) return base;
+
+  const separator = /[.!?…]$/.test(base) ? " " : ". ";
+  const candidate = `${base}${separator}${leakPhrase}`;
+  return candidate.length <= maxLength ? candidate : base;
 }
 
 function truncateText(text, maxLength = 60) {
@@ -803,6 +855,8 @@ Description (max 200 chars): Also first person from the girl's perspective. Teas
 Keep it specific to the visible scene. Do not reuse the title wording.
 
 Hashtags: pick 5-12 ONLY from: ${allowedTagsList}
+Prioritize direct trigger tags first when they clearly match what is visible, especially: hot, sexy, boobs, big tits, ass, pussy, solo, nude.
+Put the strongest click-driving tags first, then add scene/action tags.
 Trending terms from adult sites: ${trendTermsList}
 Pick 1-5 matching terms. Rate relevance 0-100.
 
@@ -854,8 +908,15 @@ JSON only:
 
   // Process description
   const rawDescription = sanitizeEnglishText(parsed.description, "");
+  const leakReadyDescription = maybeAddLeakWording(rawDescription, {
+    seed: filename,
+    maxLength: 200,
+  });
   const descriptionEmoji = pickEmoji(`${filename}:description`, DESCRIPTION_EMOJIS);
-  const description = enforceSexyTone(rawDescription, { isTitle: false, emoji: descriptionEmoji });
+  const description = enforceSexyTone(leakReadyDescription, {
+    isTitle: false,
+    emoji: descriptionEmoji,
+  });
 
   // Process hashtags — filter to allowed only
   const allowedTagSet = new Set(allowedTags);
@@ -867,7 +928,7 @@ JSON only:
     const modelTags = normalizeTags(parsed.hashtags || []);
     hashtags = [...new Set([...hashtags, ...modelTags])].slice(0, MAX_ITEM_HASHTAGS);
   }
-  hashtags = hashtags.slice(0, MAX_ITEM_HASHTAGS);
+  hashtags = sortTagsByPriority(hashtags).slice(0, MAX_ITEM_HASHTAGS);
 
   // VIP — directly from model's vision analysis
   const vip = Boolean(parsed.vip);
@@ -918,7 +979,18 @@ function rankGlobalHashtags(mediaItems) {
   }
 
   return [...stats.entries()]
-    .sort((a, b) => b[1] - a[1])
+    .sort((a, b) => {
+      const orderedPair = sortTagsByPriority([a[0], b[0]]);
+      const isPriorityOrderDifferent =
+        orderedPair.length === 2 &&
+        (orderedPair[0] !== a[0] || orderedPair[1] !== b[0]);
+
+      if (isPriorityOrderDifferent) {
+        return orderedPair[0] === a[0] ? -1 : 1;
+      }
+
+      return b[1] - a[1] || a[0].localeCompare(b[0]);
+    })
     .slice(0, TARGET_GLOBAL_HASHTAGS)
     .map(([tag]) => tag);
 }

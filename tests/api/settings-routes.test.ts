@@ -42,11 +42,46 @@ describe("settings routes", () => {
     });
   });
 
+  test("PUT /api/settings validates uploadCollections array", async () => {
+    mocks.readBody.mockResolvedValue({ uploadCollections: "bad" });
+    const handler = (await import("../../server/api/settings.put")).default;
+    const event = {} as Parameters<typeof handler>[0];
+
+    await expect(handler(event)).rejects.toMatchObject({
+      cause: {
+        statusCode: 400,
+        statusMessage: "uploadCollections must be an array",
+      },
+    });
+  });
+
+  test("PUT /api/settings validates uploadDistributionMode value", async () => {
+    mocks.readBody.mockResolvedValue({ uploadDistributionMode: "bad" });
+    const handler = (await import("../../server/api/settings.put")).default;
+    const event = {} as Parameters<typeof handler>[0];
+
+    await expect(handler(event)).rejects.toMatchObject({
+      cause: {
+        statusCode: 400,
+        statusMessage: "uploadDistributionMode must be 'range' or 'even'",
+      },
+    });
+  });
+
   test("PUT /api/settings forwards body to writeSettings", async () => {
     mocks.readBody.mockResolvedValue({
       env: { A: "1" },
       collectionId: "cid",
       autoUploadAfterAnalyze: true,
+      uploadDistributionMode: "range",
+      uploadCollections: [
+        {
+          collectionId: "cid",
+          createUrl: "https://collections.only-nice.com/collection/cid",
+          rangeStart: 1,
+          rangeEnd: 4,
+        },
+      ],
     });
     mocks.writeSettings.mockReturnValue({ ok: true });
 
@@ -58,6 +93,15 @@ describe("settings routes", () => {
       env: { A: "1" },
       collectionId: "cid",
       autoUploadAfterAnalyze: true,
+      uploadDistributionMode: "range",
+      uploadCollections: [
+        {
+          collectionId: "cid",
+          createUrl: "https://collections.only-nice.com/collection/cid",
+          rangeStart: 1,
+          rangeEnd: 4,
+        },
+      ],
     });
     expect(result).toEqual({ ok: true });
   });

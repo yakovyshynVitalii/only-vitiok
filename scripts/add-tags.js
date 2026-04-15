@@ -1,15 +1,14 @@
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
+const { parseUploadTargets, planUploads } = require("./upload-targets");
 
 function getEnv() {
-  const createUrl = process.env.CREATE_URL;
-  if (!createUrl) {
-    throw new Error("CREATE_URL is missing. Add CREATE_URL to .env");
-  }
+  const { distributionMode, targets } = parseUploadTargets(process.env);
 
   return {
-    CREATE_URL: createUrl,
+    distributionMode,
+    uploadTargets: targets,
     MEDIA_CONFIG_PATH: path.resolve(process.env.MEDIA_CONFIG_PATH || "./media-config.json"),
     HEADLESS: String(process.env.HEADLESS || "false").toLowerCase() === "true",
   };
@@ -48,17 +47,9 @@ function normalizeTag(value) {
     .toLowerCase();
 }
 
-function getTagsFromConfig(config) {
-  const fromGlobal = Array.isArray(config.hashtags)
-    ? [...new Set(config.hashtags.map(normalizeTag).filter(Boolean))]
-    : [];
-
-  if (fromGlobal.length) {
-    return fromGlobal.slice(0, 15);
-  }
-
+function rankTags(items) {
   const stats = new Map();
-  for (const item of config.items || []) {
+  for (const item of items || []) {
     for (const tag of Array.isArray(item?.hashtags) ? item.hashtags : []) {
       const normalized = normalizeTag(tag);
       if (!normalized) continue;
@@ -72,21 +63,135 @@ function getTagsFromConfig(config) {
     .map(([tag]) => tag);
 }
 
+function getTagsFromConfig(config) {
+  const fromGlobal = Array.isArray(config.hashtags)
+    ? [...new Set(config.hashtags.map(normalizeTag).filter(Boolean))]
+    : [];
+
+  if (fromGlobal.length) {
+    return fromGlobal.slice(0, 15);
+  }
+
+  return rankTags(config.items || []);
+}
+
+function getTagsForPlan(plan, config) {
+  const itemTags = rankTags(plan.items || []);
+  if (itemTags.length) return itemTags;
+  return getTagsFromConfig(config);
+}
+
+function getActiveUploadTargets(config, env) {
+  const plans = planUploads(
+    Array.isArray(config?.items) ? config.items : [],
+    env.uploadTargets,
+    env.distributionMode
+  );
+  const uniqueTargets = [];
+  const seenUrls = new Set();
+
+  for (const plan of plans.plans) {
+    if (!plan.items.length) continue;
+    if (!plan.createUrl || seenUrls.has(plan.createUrl)) continue;
+    seenUrls.add(plan.createUrl);
+    uniqueTargets.push(plan);
+  }
+
+  return uniqueTargets;
+}
+
+async function findNearestAddButton(page, inputBox) {
+  if (!inputBox) return null;
+
+  const buttons = page.locator("button:visible");
+  const count = await buttons.count();
+  const inputCenterY = inputBox.y + inputBox.height / 2;
+  const inputRightX = inputBox.x + inputBox.width;
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < count; index += 1) {
+    const button = buttons.nth(index);
+    const box = await button.boundingBox().catch(() => null);
+    if (!box) continue;
+
+    const buttonCenterY = box.y + box.height / 2;
+    const horizontalDistance = box.x - inputRightX;
+    const verticalDistance = Math.abs(buttonCenterY - inputCenterY);
+
+    if (horizontalDistance < -4 || horizontalDistance > 220) continue;
+    if (verticalDistance > Math.max(inputBox.height, box.height)) continue;
+
+    if (horizontalDistance < bestDistance) {
+      bestDistance = horizontalDistance;
+      bestIndex = index;
+    }
+  }
+
+  if (bestIndex >= 0) {
+    return buttons.nth(bestIndex);
+  }
+
+  return null;
+}
+
+async function getComposerControls(page) {
+  const inputs = page.locator("input:visible");
+  const count = await inputs.count();
+  let fallbackInput = null;
+  let fallbackButton = null;
+
+  for (let index = 0; index < count; index += 1) {
+    const input = inputs.nth(index);
+    const placeholder = String(
+      (await input.getAttribute("placeholder").catch(() => "")) || ""
+    ).trim();
+    const inputBox = await input.boundingBox().catch(() => null);
+    if (!inputBox) continue;
+
+    const addButton = await findNearestAddButton(page, inputBox);
+    if (!addButton) continue;
+
+    if (!fallbackInput) {
+      fallbackInput = input;
+      fallbackButton = addButton;
+    }
+
+    if (!/поиск|search/i.test(placeholder)) {
+      return { input, addButton };
+    }
+  }
+
+  if (fallbackInput && fallbackButton) {
+    return { input: fallbackInput, addButton: fallbackButton };
+  }
+
+  return {
+    input: inputs.first(),
+    addButton: page.locator("button:visible").last(),
+  };
+}
+
 async function openTagModal(page) {
-  const tagButtons = page.locator('button:has(span[class*="i-solar:tag-outline"]):visible');
+  const tagButtons = page.locator(
+    [
+      'button:has(span[class*="tag"]):visible',
+      'button:has(i[class*="tag"]):visible',
+      'button[aria-label*="tag" i]:visible',
+      'button:has-text("Tag"):visible',
+      'button:has-text("Tags"):visible',
+    ].join(", ")
+  );
   const count = await tagButtons.count();
-  if (!count) throw new Error("Tag button not found");
+  if (!count) throw new Error("Tag button not found on collection page");
 
   // The page may have multiple tag icons; try candidates until modal controls appear.
-  for (let i = 0; i < Math.min(count, 6); i += 1) {
+  for (let i = 0; i < Math.min(count, 10); i += 1) {
     const btn = tagButtons.nth(i);
     await btn.click().catch(() => {});
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(350);
 
-    const input = page.locator('input[type="text"]:visible').first();
-    const addBtn = page
-      .locator('button:has(span[class*="i-solar:add-circle-outline"]):visible')
-      .first();
+    const { input, addButton: addBtn } = await getComposerControls(page);
 
     const inputVisible = (await input.count()) > 0;
     const addVisible = (await addBtn.count()) > 0;
@@ -98,21 +203,14 @@ async function openTagModal(page) {
 }
 
 async function addAllTagsInModal(page, tags) {
-  const inputByPlaceholder = page
-    .locator('input[type="text"][placeholder*="Anal"][placeholder*="plug"]:visible')
-    .first();
-  const fallbackInput = page.locator('input[type="text"]:visible').first();
-  const tagInput = (await inputByPlaceholder.count()) > 0 ? inputByPlaceholder : fallbackInput;
-  await tagInput.waitFor({ state: "visible", timeout: 10000 });
-
-  const addBtn = page
-    .locator('button:has(span[class*="i-solar:add-circle-outline"]):visible')
-    .first();
-  await addBtn.waitFor({ state: "visible", timeout: 10000 });
-
   for (const tag of tags) {
+    const { input: tagInput, addButton: addBtn } = await getComposerControls(page);
+    await tagInput.waitFor({ state: "visible", timeout: 10000 });
+    await addBtn.waitFor({ state: "visible", timeout: 10000 });
+
+    console.log(`   Typing tag: ${tag}`);
     await tagInput.fill(tag);
-    await page.waitForTimeout(120);
+    await page.waitForTimeout(180);
 
     const enabled = await addBtn.isEnabled().catch(() => false);
     if (!enabled) {
@@ -120,8 +218,17 @@ async function addAllTagsInModal(page, tags) {
       continue;
     }
 
-    await addBtn.click();
-    await page.waitForTimeout(180);
+    await addBtn.click({ timeout: 5000 }).catch(async () => {
+      await addBtn.click({ force: true, timeout: 5000 });
+    });
+    await page.waitForTimeout(500);
+
+    const cleared = (await tagInput.inputValue().catch(() => "")) === "";
+    if (!cleared) {
+      await tagInput.press("Enter").catch(() => {});
+      await page.waitForTimeout(350);
+    }
+
     console.log(`🏷 Tag added: ${tag}`);
   }
 }
@@ -129,7 +236,14 @@ async function addAllTagsInModal(page, tags) {
 async function closeTagModal(page) {
   const closeBtn = page
     .locator(
-      'button:has-text("×"), button:has-text("✕"), button:has(span[class*="i-lucide:x"]), button:has(span[class*="i-heroicons:x-mark"])'
+      [
+        'button:has-text("×")',
+        'button:has-text("✕")',
+        'button:has(span[class*="x"])',
+        'button:has(i[class*="x"])',
+        'button[aria-label*="close" i]',
+        'button:has-text("Close")',
+      ].join(", ")
     )
     .first();
 
@@ -143,37 +257,97 @@ async function closeTagModal(page) {
   await page.waitForTimeout(200);
 }
 
+function getStorageStatePath() {
+  return path.resolve("state.json");
+}
+
+function ensureStorageStateExists() {
+  const storageStatePath = getStorageStatePath();
+
+  if (!fs.existsSync(storageStatePath)) {
+    throw new Error(
+      "state.json is missing. Click Login, sign in in the browser, then click Finish login before running Add tags."
+    );
+  }
+
+  return storageStatePath;
+}
+
+async function ensureCollectionLoaded(page, createUrl) {
+  await page.goto(createUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForLoadState("networkidle").catch(() => {});
+  await page.waitForTimeout(1200);
+}
+
 (async () => {
   loadDotEnv();
   const env = getEnv();
   const config = readConfig(env.MEDIA_CONFIG_PATH);
-  const tags = getTagsFromConfig(config);
+  const activeTargets = getActiveUploadTargets(config, env);
+  const storageStatePath = ensureStorageStateExists();
 
-  if (!tags.length) {
-    console.log("✅ No tags found in config to add");
+  if (!activeTargets.length) {
+    console.log("✅ No collections with assigned assets found for tag sync");
     return;
   }
 
   const browser = await chromium.launch({ headless: env.HEADLESS });
-  const context = await browser.newContext({ storageState: "state.json" });
+  const context = await browser.newContext({ storageState: storageStatePath });
   const page = await context.newPage();
+  const failures = [];
 
   try {
     console.log("1) Opening browser");
-    await page.goto(env.CREATE_URL, { waitUntil: "networkidle" });
-    console.log("2) Site loaded");
 
-    console.log("3) Clicking tag button");
-    await openTagModal(page);
-    console.log("4) Tag modal is open");
+    for (let index = 0; index < activeTargets.length; index += 1) {
+      const target = activeTargets[index];
 
-    console.log(`5-6) Adding tags (${tags.length})`);
-    await addAllTagsInModal(page, tags);
+      try {
+        const tags = getTagsForPlan(target, config);
+        if (!tags.length) {
+          console.log(`⚠️  No tags found for collection ${target.createUrl}, skipping`);
+          continue;
+        }
 
-    console.log("7) Closing tag modal");
-    await closeTagModal(page);
+        console.log(
+          `${index + 2}) Opening collection ${index + 1}/${activeTargets.length}: ${target.createUrl}`
+        );
+        await ensureCollectionLoaded(page, target.createUrl);
+
+        console.log(`   Clicking tag button for collection ${index + 1}`);
+        await openTagModal(page);
+
+        console.log(`   Adding tags (${tags.length})`);
+        await addAllTagsInModal(page, tags);
+
+        console.log(`   Closing tag modal for collection ${index + 1}`);
+        await closeTagModal(page);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push({
+          createUrl: target.createUrl,
+          message,
+        });
+        console.log(`❌ Failed to add tags for collection ${target.createUrl}`);
+        console.log(message);
+      }
+    }
+
+    if (failures.length) {
+      throw new Error(
+        failures
+          .map(
+            (failure, index) =>
+              `${index + 1}. ${failure.createUrl} -> ${failure.message}`
+          )
+          .join("\n")
+      );
+    }
   } finally {
-    console.log("8) Closing browser");
+    console.log("9) Closing browser");
     await browser.close();
   }
-})();
+})().catch((err) => {
+  console.error("❌ add-tags failed:", err.message);
+  process.exit(1);
+});

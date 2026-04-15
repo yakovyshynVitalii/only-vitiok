@@ -7,6 +7,8 @@ export const STATE_PATH = path.resolve(ROOT_DIR, "state.json");
 export const DEFAULT_ENV: Record<string, string> = {
   BASE_URL: "",
   CREATE_URL: "",
+  UPLOAD_COLLECTIONS: "",
+  UPLOAD_DISTRIBUTION_MODE: "range",
   COLLECTION_ID: "",
   OLLAMA_URL: "http://127.0.0.1:11434",
   OLLAMA_MODEL: "qwen2.5vl:7b",
@@ -32,6 +34,8 @@ export const ENV_WRITE_ORDER = [
   "BASE_URL",
   "COLLECTION_ID",
   "CREATE_URL",
+  "UPLOAD_COLLECTIONS",
+  "UPLOAD_DISTRIBUTION_MODE",
   "OLLAMA_URL",
   "OLLAMA_MODEL",
   "AI_ANALYSIS_CONCURRENCY",

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   readBody: vi.fn(),
   readSettings: vi.fn(),
   getConfigPath: vi.fn(),
+  resetConfigAnalysisState: vi.fn(),
 }));
 
 vi.mock("h3", async () => {
@@ -20,6 +21,10 @@ vi.mock("h3", async () => {
 vi.mock("~/server/utils/settings", () => ({
   readSettings: mocks.readSettings,
   getConfigPath: mocks.getConfigPath,
+}));
+
+vi.mock("~/server/utils/media-config", () => ({
+  resetConfigAnalysisState: mocks.resetConfigAnalysisState,
 }));
 
 const tempDirs: string[] = [];
@@ -105,5 +110,26 @@ describe("config routes", () => {
 
     const saved = JSON.parse(fs.readFileSync(configPath, "utf8"));
     expect(saved).toEqual(payload);
+  });
+
+  test("DELETE /api/config/clear resets generated analysis state", async () => {
+    mocks.readSettings.mockReturnValue({});
+    mocks.resetConfigAnalysisState.mockReturnValue({
+      configPath: "/tmp/media-config.json",
+      itemCount: 3,
+      cleared: true,
+    });
+
+    const handler = (await import("../../server/api/config/clear.delete")).default;
+    const event = {} as Parameters<typeof handler>[0];
+    const result = handler(event);
+
+    expect(mocks.resetConfigAnalysisState).toHaveBeenCalledWith({});
+    expect(result).toEqual({
+      ok: true,
+      configPath: "/tmp/media-config.json",
+      itemCount: 3,
+      cleared: true,
+    });
   });
 });

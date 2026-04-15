@@ -17,6 +17,17 @@ export interface AppSettings {
   envText: string;
   collectionId: string;
   autoUploadAfterAnalyze: boolean;
+  uploadDistributionMode: UploadDistributionMode;
+  uploadCollections: UploadCollectionTarget[];
+}
+
+export type UploadDistributionMode = "range" | "even";
+
+export interface UploadCollectionTarget {
+  collectionId: string;
+  createUrl: string;
+  rangeStart: number | null;
+  rangeEnd: number | null;
 }
 
 function sortEnvKeys(env: Record<string, string>): Record<string, string> {
@@ -46,6 +57,105 @@ function buildCreateUrl(baseUrl: string, collectionId: string): string {
   return `${trimmedBase}/collection/${trimmedCollection}`;
 }
 
+function normalizeAssetCount(value: unknown): number | null {
+  if (value == null) return null;
+
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.floor(parsed));
+}
+
+function normalizeRangePoint(value: unknown): number | null {
+  const normalized = normalizeAssetCount(value);
+  if (normalized == null) return null;
+  return normalized <= 0 ? 1 : normalized;
+}
+
+function parseDistributionMode(value: string): UploadDistributionMode {
+  return String(value || "").trim().toLowerCase() === "even" ? "even" : "range";
+}
+
+function normalizeUploadCollectionTarget(
+  input:
+    | (Partial<UploadCollectionTarget> & { assetCount?: number | null })
+    | null
+    | undefined,
+  baseUrl: string
+): UploadCollectionTarget | null {
+  const collectionId = String(input?.collectionId || "").trim();
+  const explicitCreateUrl = String(input?.createUrl || "").trim();
+  const createUrl = explicitCreateUrl || buildCreateUrl(baseUrl, collectionId);
+  let rangeStart = normalizeRangePoint(input?.rangeStart);
+  let rangeEnd = normalizeRangePoint(input?.rangeEnd);
+
+  if (rangeStart != null && rangeEnd != null && rangeEnd < rangeStart) {
+    rangeEnd = rangeStart;
+  }
+
+  if (rangeStart == null && rangeEnd == null) {
+    const legacyAssetCount = normalizeAssetCount(input?.assetCount);
+    if (legacyAssetCount != null) {
+      rangeStart = 1;
+      rangeEnd = legacyAssetCount === 0 ? 1 : legacyAssetCount;
+    }
+  }
+
+  if (!collectionId && !createUrl) return null;
+
+  return {
+    collectionId,
+    createUrl,
+    rangeStart,
+    rangeEnd,
+  };
+}
+
+function parseUploadCollections(
+  raw: string,
+  baseUrl: string
+): UploadCollectionTarget[] {
+  const normalizedRaw = String(raw || "").trim();
+  if (!normalizedRaw) return [];
+
+  try {
+    const parsed = JSON.parse(normalizedRaw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .map((item) =>
+        normalizeUploadCollectionTarget(
+          item as Partial<UploadCollectionTarget>,
+          baseUrl
+        )
+      )
+      .filter((item): item is UploadCollectionTarget => Boolean(item));
+  } catch {
+    return [];
+  }
+}
+
+function getLegacyUploadCollections(
+  env: Record<string, string>
+): UploadCollectionTarget[] {
+  const collectionId = String(env.COLLECTION_ID || "").trim();
+  const createUrl =
+    String(env.CREATE_URL || "").trim() || buildCreateUrl(env.BASE_URL, collectionId);
+
+  if (!collectionId && !createUrl) return [];
+
+  return [
+    {
+      collectionId,
+      createUrl,
+      rangeStart: null,
+      rangeEnd: null,
+    },
+  ];
+}
+
 function parseBool(value: string, fallback = false): boolean {
   const normalized = String(value || "").trim().toLowerCase();
   if (!normalized) return fallback;
@@ -61,6 +171,16 @@ export function readSettings(): AppSettings {
   });
 
   const collectionId = env.COLLECTION_ID || extractCollectionId(env.CREATE_URL);
+  const uploadDistributionMode = parseDistributionMode(
+    env.UPLOAD_DISTRIBUTION_MODE
+  );
+  const parsedUploadCollections = parseUploadCollections(
+    env.UPLOAD_COLLECTIONS,
+    env.BASE_URL
+  );
+  const uploadCollections = parsedUploadCollections.length
+    ? parsedUploadCollections
+    : getLegacyUploadCollections(env);
   const autoUploadAfterAnalyze = parseBool(
     env.AUTO_UPLOAD_AFTER_ANALYZE,
     false
@@ -69,8 +189,10 @@ export function readSettings(): AppSettings {
   return {
     env,
     envText,
-    collectionId,
+    collectionId: uploadCollections[0]?.collectionId || collectionId,
     autoUploadAfterAnalyze,
+    uploadDistributionMode,
+    uploadCollections,
   };
 }
 
@@ -78,18 +200,44 @@ export function writeSettings(input: {
   env?: Record<string, string>;
   collectionId?: string;
   autoUploadAfterAnalyze?: boolean;
+  uploadDistributionMode?: UploadDistributionMode;
+  uploadCollections?: Array<
+    Partial<UploadCollectionTarget> & {
+      assetCount?: number | null;
+    }
+  >;
 }): AppSettings {
   const current = readSettings();
   const explicitCreateUrlProvided = Object.prototype.hasOwnProperty.call(
     input.env || {},
     "CREATE_URL"
   );
+  const explicitUploadCollectionsProvided = Object.prototype.hasOwnProperty.call(
+    input,
+    "uploadCollections"
+  );
   const nextEnv = {
     ...current.env,
     ...(input.env || {}),
   };
 
-  if (typeof input.collectionId === "string") {
+  if (explicitUploadCollectionsProvided) {
+    const normalizedTargets = Array.isArray(input.uploadCollections)
+      ? input.uploadCollections
+          .map((item) => normalizeUploadCollectionTarget(item, nextEnv.BASE_URL))
+          .filter((item): item is UploadCollectionTarget => Boolean(item))
+      : [];
+
+    nextEnv.UPLOAD_COLLECTIONS = normalizedTargets.length
+      ? JSON.stringify(normalizedTargets)
+      : "";
+
+    const primaryTarget = normalizedTargets[0];
+    nextEnv.COLLECTION_ID = primaryTarget?.collectionId || "";
+    nextEnv.CREATE_URL = primaryTarget?.createUrl || "";
+  }
+
+  if (typeof input.collectionId === "string" && !explicitUploadCollectionsProvided) {
     const trimmedCollection = input.collectionId.trim();
     nextEnv.COLLECTION_ID = trimmedCollection;
 
@@ -99,12 +247,47 @@ export function writeSettings(input: {
         nextEnv.CREATE_URL = generatedCreateUrl;
       }
     }
+
+    const primaryTarget = normalizeUploadCollectionTarget(
+      {
+        collectionId: nextEnv.COLLECTION_ID,
+        createUrl: nextEnv.CREATE_URL,
+        rangeStart: null,
+        rangeEnd: null,
+      },
+      nextEnv.BASE_URL
+    );
+
+    nextEnv.UPLOAD_COLLECTIONS = primaryTarget ? JSON.stringify([primaryTarget]) : "";
+  }
+
+  if (explicitCreateUrlProvided && !explicitUploadCollectionsProvided) {
+    nextEnv.COLLECTION_ID =
+      String(nextEnv.COLLECTION_ID || "").trim() ||
+      extractCollectionId(nextEnv.CREATE_URL);
+
+    const primaryTarget = normalizeUploadCollectionTarget(
+      {
+        collectionId: nextEnv.COLLECTION_ID,
+        createUrl: nextEnv.CREATE_URL,
+        rangeStart: null,
+        rangeEnd: null,
+      },
+      nextEnv.BASE_URL
+    );
+
+    nextEnv.UPLOAD_COLLECTIONS = primaryTarget ? JSON.stringify([primaryTarget]) : "";
   }
 
   if (typeof input.autoUploadAfterAnalyze === "boolean") {
     nextEnv.AUTO_UPLOAD_AFTER_ANALYZE = input.autoUploadAfterAnalyze
       ? "true"
       : "false";
+  }
+
+  if (typeof input.uploadDistributionMode === "string") {
+    nextEnv.UPLOAD_DISTRIBUTION_MODE =
+      input.uploadDistributionMode === "even" ? "even" : "range";
   }
 
   const sanitized: Record<string, string> = {};

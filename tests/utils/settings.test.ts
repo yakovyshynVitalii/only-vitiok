@@ -32,9 +32,11 @@ describe("settings utils", () => {
     expect(settings.env.MEDIA_IMPORT_PROJECT_ROOT).toBe("true");
     expect(settings.collectionId).toBe("");
     expect(settings.autoUploadAfterAnalyze).toBe(false);
+    expect(settings.uploadDistributionMode).toBe("range");
+    expect(settings.uploadCollections).toEqual([]);
   });
 
-  test("writeSettings persists normalized env and derives CREATE_URL", async () => {
+  test("writeSettings persists upload collections and derives CREATE_URL", async () => {
     const tempDir = makeTempDir();
     tempDirs.push(tempDir);
     process.chdir(tempDir);
@@ -48,23 +50,54 @@ describe("settings utils", () => {
 
     const next = settingsMod.writeSettings({
       env: { CUSTOM_KEY: " custom ", EXTRA: "x" },
-      collectionId: "  abc-123  ",
+      uploadCollections: [
+        {
+          collectionId: "  abc-123  ",
+          rangeStart: 1,
+          rangeEnd: 3,
+        },
+        {
+          createUrl: "https://collections.only-nice.com/collection/manual-2",
+          rangeStart: 4,
+          rangeEnd: 8,
+        },
+      ],
+      uploadDistributionMode: "range",
       autoUploadAfterAnalyze: true,
     });
 
     expect(next.collectionId).toBe("abc-123");
     expect(next.autoUploadAfterAnalyze).toBe(true);
+    expect(next.uploadDistributionMode).toBe("range");
     expect(next.env.CREATE_URL).toBe(
       "https://collections.only-nice.com/collection/abc-123"
     );
     expect(next.env.CUSTOM_KEY).toBe("custom");
     expect(next.env.EXTRA).toBe("x");
+    expect(next.uploadCollections).toEqual([
+      {
+        collectionId: "abc-123",
+        createUrl: "https://collections.only-nice.com/collection/abc-123",
+        rangeStart: 1,
+        rangeEnd: 3,
+      },
+      {
+        collectionId: "",
+        createUrl: "https://collections.only-nice.com/collection/manual-2",
+        rangeStart: 4,
+        rangeEnd: 8,
+      },
+    ]);
 
     const persisted = fs.readFileSync(path.resolve(tempDir, ".env"), "utf8");
     expect(persisted).toContain("COLLECTION_ID=abc-123");
     expect(persisted).toContain(
       "CREATE_URL=https://collections.only-nice.com/collection/abc-123"
     );
+    expect(persisted).toContain(
+      'UPLOAD_COLLECTIONS=[{"collectionId":"abc-123","createUrl":"https://collections.only-nice.com/collection/abc-123","rangeStart":1,"rangeEnd":3},{"collectionId":"","createUrl":"https://collections.only-nice.com/collection/manual-2","rangeStart":4,"rangeEnd":8}]'
+    );
+    expect(persisted).toContain("UPLOAD_DISTRIBUTION_MODE=range");
     expect(persisted).toContain("AUTO_UPLOAD_AFTER_ANALYZE=true");
   });
 
@@ -96,6 +129,42 @@ describe("settings utils", () => {
     expect(next.env.CREATE_URL).toBe(
       "https://collections.only-nice.com/collection/manual-collection?from=custom"
     );
+    expect(next.uploadCollections).toEqual([
+      {
+        collectionId: "new-collection",
+        createUrl:
+          "https://collections.only-nice.com/collection/manual-collection?from=custom",
+        rangeStart: null,
+        rangeEnd: null,
+      },
+    ]);
+  });
+
+  test("readSettings falls back to legacy CREATE_URL when UPLOAD_COLLECTIONS is empty", async () => {
+    const tempDir = makeTempDir();
+    tempDirs.push(tempDir);
+    process.chdir(tempDir);
+    fs.writeFileSync(
+      path.resolve(tempDir, ".env"),
+      [
+        "BASE_URL=https://collections.only-nice.com",
+        "COLLECTION_ID=legacy-collection",
+        "CREATE_URL=https://collections.only-nice.com/collection/legacy-collection",
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const settingsMod = await import("~/server/utils/settings");
+    const next = settingsMod.readSettings();
+
+    expect(next.uploadCollections).toEqual([
+      {
+        collectionId: "legacy-collection",
+        createUrl: "https://collections.only-nice.com/collection/legacy-collection",
+        rangeStart: null,
+        rangeEnd: null,
+      },
+    ]);
   });
 
   test("getMediaFolder/getConfigPath/ensureMediaFolder resolve paths from root", async () => {
@@ -111,6 +180,8 @@ describe("settings utils", () => {
       envText: "",
       collectionId: "",
       autoUploadAfterAnalyze: false,
+      uploadDistributionMode: "range" as const,
+      uploadCollections: [],
     };
 
     const mediaFolder = settingsMod.getMediaFolder(settings);

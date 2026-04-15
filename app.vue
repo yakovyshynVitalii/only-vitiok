@@ -6,6 +6,17 @@ interface SettingsResponse {
   envText: string;
   collectionId: string;
   autoUploadAfterAnalyze: boolean;
+  uploadDistributionMode: UploadDistributionMode;
+  uploadCollections: UploadCollectionTarget[];
+}
+
+type UploadDistributionMode = "range" | "even";
+
+interface UploadCollectionTarget {
+  collectionId: string;
+  createUrl: string;
+  rangeStart: number | null;
+  rangeEnd: number | null;
 }
 
 interface AuthStatusResponse {
@@ -35,6 +46,9 @@ interface ConfigItem {
   trendScore?: number;
   contentSummary?: string;
   vip?: boolean;
+  uploaded?: boolean;
+  uploadCollectionId?: string;
+  uploadCreateUrl?: string;
 }
 
 interface TaskStatusResponse {
@@ -44,7 +58,8 @@ interface TaskStatusResponse {
 }
 
 const envMap = reactive<Record<string, string>>({});
-const collectionId = ref("");
+const uploadCollections = ref<UploadCollectionTarget[]>([]);
+const uploadDistributionMode = ref<UploadDistributionMode>("range");
 const autoUploadAfterAnalyze = ref(false);
 
 const stateExists = ref(false);
@@ -71,6 +86,7 @@ const isStoppingAnalyze = ref(false);
 const isDragOver = ref(false);
 const isSettingsOpen = ref(false);
 const isClearingMedia = ref(false);
+const isClearingGeneratedConfig = ref(false);
 const isScanningMedia = ref(false);
 const isConfigDrawerOpen = ref(false);
 const isLogsDrawerOpen = ref(false);
@@ -92,6 +108,8 @@ const MANAGED_ENV_KEYS = new Set([
   "BASE_URL",
   "COLLECTION_ID",
   "CREATE_URL",
+  "UPLOAD_COLLECTIONS",
+  "UPLOAD_DISTRIBUTION_MODE",
   "AUTO_UPLOAD_AFTER_ANALYZE",
 ]);
 
@@ -105,13 +123,6 @@ const baseUrl = computed({
   get: () => envMap.BASE_URL || "",
   set: (value: string) => {
     envMap.BASE_URL = value;
-  },
-});
-
-const createUrl = computed({
-  get: () => envMap.CREATE_URL || "",
-  set: (value: string) => {
-    envMap.CREATE_URL = value;
   },
 });
 
@@ -193,6 +204,64 @@ const globalTags = computed(() => {
     : [];
 
   return [...new Set(fromItems)];
+});
+
+const normalizedUploadCollections = computed<UploadCollectionTarget[]>(() =>
+  uploadCollections.value
+    .map((target) => {
+      const collectionId = String(target.collectionId || "").trim();
+      const createUrl =
+        String(target.createUrl || "").trim() || deriveCreateUrl(baseUrl.value, collectionId);
+      const rangeStart = normalizeRangePoint(target.rangeStart);
+      let rangeEnd = normalizeRangePoint(target.rangeEnd);
+
+      if (rangeStart != null && rangeEnd != null && rangeEnd < rangeStart) {
+        rangeEnd = rangeStart;
+      }
+
+      if (!collectionId && !createUrl) return null;
+
+      return {
+        collectionId,
+        createUrl,
+        rangeStart,
+        rangeEnd,
+      };
+    })
+    .filter((target): target is UploadCollectionTarget => Boolean(target))
+);
+
+const plannedUploadBreakdown = computed(() => {
+  const breakdown: Array<{
+    label: string;
+    rangeText: string;
+    assignedCount: number;
+    createUrl: string;
+  }> = [];
+  const plans = planUploadTargets(
+    configItems.value,
+    normalizedUploadCollections.value,
+    uploadDistributionMode.value
+  );
+
+  for (let index = 0; index < plans.length; index += 1) {
+    const plan = plans[index];
+    breakdown.push({
+      label: getUploadCollectionLabel(plan, index),
+      rangeText: formatTargetRange(plan, uploadDistributionMode.value),
+      assignedCount: plan.items.length,
+      createUrl: plan.createUrl,
+    });
+  }
+
+  return {
+    assignedCount: plans.reduce((sum, plan) => sum + plan.items.length, 0),
+    unassignedCount: Math.max(
+      configItems.value.length - plans.reduce((sum, plan) => sum + plan.items.length, 0),
+      0
+    ),
+    targets: breakdown,
+  };
 });
 
 const IMAGE_EXTENSIONS = new Set([
@@ -359,9 +428,145 @@ function deriveCreateUrl(base: string, collection: string): string {
   return `${trimmedBase}/collection/${trimmedCollection}`;
 }
 
-function applyCollectionToCreateUrl() {
-  const generated = deriveCreateUrl(baseUrl.value, collectionId.value);
-  if (generated) createUrl.value = generated;
+function normalizeAssetCount(value: unknown): number | null {
+  if (value == null) return null;
+
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.floor(parsed));
+}
+
+function normalizeRangePoint(value: unknown): number | null {
+  const normalized = normalizeAssetCount(value);
+  if (normalized == null) return null;
+  return normalized <= 0 ? 1 : normalized;
+}
+
+function createEmptyUploadCollection(): UploadCollectionTarget {
+  return {
+    collectionId: "",
+    createUrl: "",
+    rangeStart: null,
+    rangeEnd: null,
+  };
+}
+
+function cloneUploadCollections(): UploadCollectionTarget[] {
+  return uploadCollections.value.map((target) => ({
+    collectionId: String(target.collectionId || "").trim(),
+    createUrl: String(target.createUrl || "").trim(),
+    rangeStart: normalizeRangePoint(target.rangeStart),
+    rangeEnd: normalizeRangePoint(target.rangeEnd),
+  }));
+}
+
+function getUploadCollectionLabel(target: UploadCollectionTarget, index: number): string {
+  return (
+    String(target.collectionId || "").trim() ||
+    String(target.createUrl || "")
+      .match(/\/collection\/([^/?#]+)/i)?.[1] ||
+    `Collection ${index + 1}`
+  );
+}
+
+function syncUploadCollectionUrl(index: number) {
+  const target = uploadCollections.value[index];
+  if (!target) return;
+
+  const generated = deriveCreateUrl(baseUrl.value, target.collectionId);
+  if (generated) {
+    target.createUrl = generated;
+  }
+}
+
+function syncAllUploadCollectionUrls() {
+  for (let index = 0; index < uploadCollections.value.length; index += 1) {
+    syncUploadCollectionUrl(index);
+  }
+}
+
+function addUploadCollection() {
+  uploadCollections.value.push(createEmptyUploadCollection());
+}
+
+function removeUploadCollection(index: number) {
+  uploadCollections.value.splice(index, 1);
+}
+
+function updateUploadCollectionRangePoint(
+  index: number,
+  field: "rangeStart" | "rangeEnd",
+  value: string | number
+) {
+  const target = uploadCollections.value[index];
+  if (!target) return;
+  target[field] = normalizeRangePoint(value);
+}
+
+function formatTargetRange(
+  target: UploadCollectionTarget,
+  mode: UploadDistributionMode
+): string {
+  if (mode === "even") return "Even split";
+
+  const start = target.rangeStart ?? 1;
+  const end = target.rangeEnd;
+  return end != null ? `${start}-${end}` : `${start}+`;
+}
+
+function planUploadTargets(
+  items: ConfigItem[],
+  targets: UploadCollectionTarget[],
+  mode: UploadDistributionMode
+) {
+  if (!targets.length || !items.length) return [];
+
+  if (mode === "even") {
+    const total = items.length;
+    const base = Math.floor(total / targets.length);
+    const remainder = total % targets.length;
+    const plans: Array<UploadCollectionTarget & { items: ConfigItem[] }> = [];
+    let cursor = 0;
+
+    for (let index = 0; index < targets.length; index += 1) {
+      const target = targets[index];
+      const size = base + (index < remainder ? 1 : 0);
+      const targetItems = items.slice(cursor, cursor + size);
+      cursor += size;
+      plans.push({
+        ...target,
+        items: targetItems,
+      });
+    }
+
+    return plans.filter((plan) => plan.items.length > 0);
+  }
+
+  const taken = new Set<number>();
+  const plans: Array<UploadCollectionTarget & { items: ConfigItem[] }> = [];
+
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
+    const start = Math.max((target.rangeStart ?? 1) - 1, 0);
+    const end = target.rangeEnd != null ? Math.min(target.rangeEnd - 1, items.length - 1) : items.length - 1;
+    const targetItems: ConfigItem[] = [];
+
+    for (let cursor = start; cursor <= end; cursor += 1) {
+      if (cursor < 0 || cursor >= items.length || taken.has(cursor)) continue;
+      taken.add(cursor);
+      targetItems.push(items[cursor] as ConfigItem);
+    }
+
+    plans.push({
+      ...target,
+      items: targetItems,
+    });
+  }
+
+  return plans.filter((plan) => plan.items.length > 0);
 }
 
 function addEnvField() {
@@ -385,7 +590,15 @@ async function loadSettings() {
   const settings = await $fetch<SettingsResponse>("/api/settings");
 
   resetEnv(settings.env);
-  collectionId.value = settings.collectionId || "";
+  uploadDistributionMode.value = settings.uploadDistributionMode || "range";
+  uploadCollections.value = settings.uploadCollections?.length
+    ? settings.uploadCollections.map((target) => ({
+        collectionId: target.collectionId || "",
+        createUrl: target.createUrl || "",
+        rangeStart: target.rangeStart ?? null,
+        rangeEnd: target.rangeEnd ?? null,
+      }))
+    : [];
   autoUploadAfterAnalyze.value = settings.autoUploadAfterAnalyze;
   envMap.AUTO_UPLOAD_AFTER_ANALYZE = settings.autoUploadAfterAnalyze
     ? "true"
@@ -404,13 +617,16 @@ async function saveSettings() {
       method: "PUT",
       body: {
         env: cloneEnvMap(),
-        collectionId: collectionId.value,
+        collectionId: normalizedUploadCollections.value[0]?.collectionId || "",
         autoUploadAfterAnalyze: autoUploadAfterAnalyze.value,
+        uploadDistributionMode: uploadDistributionMode.value,
+        uploadCollections: cloneUploadCollections(),
       },
     });
 
     resetEnv(saved.env);
-    collectionId.value = saved.collectionId;
+    uploadDistributionMode.value = saved.uploadDistributionMode || "range";
+    uploadCollections.value = saved.uploadCollections || [];
     autoUploadAfterAnalyze.value = saved.autoUploadAfterAnalyze;
     isSettingsOpen.value = false;
     setMessage("Settings saved.");
@@ -421,23 +637,30 @@ async function saveSettings() {
   }
 }
 
-async function saveCreateUrl() {
+async function saveUploadCollections() {
   isSavingCreateUrl.value = true;
 
   try {
+    envMap.AUTO_UPLOAD_AFTER_ANALYZE = autoUploadAfterAnalyze.value
+      ? "true"
+      : "false";
+
     const saved = await $fetch<SettingsResponse>("/api/settings", {
       method: "PUT",
       body: {
         env: cloneEnvMap(),
-        collectionId: collectionId.value,
+        collectionId: normalizedUploadCollections.value[0]?.collectionId || "",
         autoUploadAfterAnalyze: autoUploadAfterAnalyze.value,
+        uploadDistributionMode: uploadDistributionMode.value,
+        uploadCollections: cloneUploadCollections(),
       },
     });
 
     resetEnv(saved.env);
-    collectionId.value = saved.collectionId;
+    uploadDistributionMode.value = saved.uploadDistributionMode || "range";
+    uploadCollections.value = saved.uploadCollections || [];
     autoUploadAfterAnalyze.value = saved.autoUploadAfterAnalyze;
-    setMessage("CREATE_URL saved.");
+    setMessage("Upload collections saved.");
   } catch (error) {
     setError(error);
   } finally {
@@ -577,6 +800,43 @@ async function clearAllMedia() {
     setError(error);
   } finally {
     isClearingMedia.value = false;
+  }
+}
+
+async function clearGeneratedConfig() {
+  if (!configItems.value.length) {
+    setMessage("Config is already empty.");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    "Clear generated titles, descriptions, tags, trends, VIP and upload flags from config? Media files will stay in place."
+  );
+  if (!confirmed) return;
+
+  isClearingGeneratedConfig.value = true;
+
+  try {
+    const result = await $fetch<{
+      ok: boolean;
+      configPath: string;
+      itemCount: number;
+      cleared: boolean;
+    }>("/api/config/clear", {
+      method: "DELETE",
+    });
+
+    canResumeAnalyze.value = false;
+    await loadConfig();
+    setMessage(
+      result.cleared
+        ? `Generated config cleared for ${result.itemCount} card(s). You can start full analysis again.`
+        : "Config file was not found, nothing to clear."
+    );
+  } catch (error) {
+    setError(error);
+  } finally {
+    isClearingGeneratedConfig.value = false;
   }
 }
 
@@ -843,7 +1103,7 @@ async function startAddTags() {
     });
 
     runLog.value = result.output;
-    setMessage("Tags added to collection.");
+    setMessage("Tags added to configured collections.");
 
     await Promise.all([loadTaskStatus(), loadConfig()]);
   } catch (error) {
@@ -995,7 +1255,7 @@ onBeforeUnmount(() => {
                 :disabled="isBusy || isRunningAddTags"
                 @click="startAddTags"
               >
-                Add tags to collection
+                Add tags to collections
               </UButton>
 
               <UButton
@@ -1050,6 +1310,10 @@ onBeforeUnmount(() => {
             <div class="stack-md">
               <div>
                 <p class="field-label">Model name / nickname</p>
+                <p class="muted-text">
+                  Use the main nickname plus aliases separated by `|` so the title and description
+                  can mention them naturally for search.
+                </p>
                 <div class="create-url-row">
                   <UInput
                     v-model="collectionModelName"
@@ -1123,9 +1387,21 @@ onBeforeUnmount(() => {
                     size="sm"
                     icon="i-lucide-scan-search"
                     :loading="isScanningMedia"
+                    :disabled="isBusy || isScanningMedia || isClearingGeneratedConfig"
                     @click="scanMedia"
                   >
                     Scan media
+                  </UButton>
+                  <UButton
+                    color="warning"
+                    variant="soft"
+                    size="sm"
+                    icon="i-lucide-eraser"
+                    :loading="isClearingGeneratedConfig"
+                    :disabled="isBusy || isClearingMedia || isClearingGeneratedConfig"
+                    @click="clearGeneratedConfig"
+                  >
+                    Clear generated config
                   </UButton>
                   <UButton
                     color="error"
@@ -1133,6 +1409,7 @@ onBeforeUnmount(() => {
                     size="sm"
                     icon="i-lucide-trash-2"
                     :loading="isClearingMedia"
+                    :disabled="isBusy || isClearingMedia || isClearingGeneratedConfig"
                     @click="clearAllMedia"
                   >
                     Clear all media
@@ -1142,23 +1419,164 @@ onBeforeUnmount(() => {
             </template>
 
             <div class="create-url-input">
-              <p class="field-label">CREATE_URL (full upload URL)</p>
-              <div class="create-url-row">
-                <UInput
-                  v-model="createUrl"
-                  class="create-url-field"
+              <div class="upload-collections-head">
+                <div>
+                  <p class="field-label">Upload collections</p>
+                  <p class="muted-text">
+                    Set 1-based manual ranges like 1-50 / 51-100, or switch to even split to
+                    distribute the whole config uniformly across collections.
+                  </p>
+                </div>
+
+                <div class="upload-collections-badges">
+                  <UBadge color="neutral" variant="soft">
+                    {{ normalizedUploadCollections.length }} collection(s)
+                  </UBadge>
+                  <UBadge color="primary" variant="soft">
+                    Mode: {{ uploadDistributionMode === "even" ? "Even split" : "Range" }}
+                  </UBadge>
+                </div>
+              </div>
+
+              <div class="distribution-mode-row">
+                <UButton
+                  :color="uploadDistributionMode === 'range' ? 'primary' : 'neutral'"
+                  :variant="uploadDistributionMode === 'range' ? 'solid' : 'soft'"
                   size="lg"
-                  icon="i-lucide-link-2"
-                  placeholder="https://collections.only-nice.com/collection/..."
-                />
+                  icon="i-lucide-scan-line"
+                  @click="uploadDistributionMode = 'range'"
+                >
+                  Use ranges
+                </UButton>
+                <UButton
+                  :color="uploadDistributionMode === 'even' ? 'primary' : 'neutral'"
+                  :variant="uploadDistributionMode === 'even' ? 'solid' : 'soft'"
+                  size="lg"
+                  icon="i-lucide-split"
+                  @click="uploadDistributionMode = 'even'"
+                >
+                  Even split
+                </UButton>
+              </div>
+
+              <div class="upload-collections-list">
+                <div
+                  v-for="(target, index) in uploadCollections"
+                  :key="`upload-target-${index}`"
+                  class="upload-collection-row"
+                >
+                  <UInput
+                    v-model="target.collectionId"
+                    class="upload-collection-id"
+                    size="lg"
+                    icon="i-lucide-folders"
+                    placeholder="Collection ID"
+                  />
+                  <UInput
+                    v-model="target.createUrl"
+                    class="upload-collection-url"
+                    size="lg"
+                    icon="i-lucide-link-2"
+                    placeholder="https://collections.only-nice.com/collection/..."
+                  />
+                  <UInput
+                    :model-value="target.rangeStart == null ? '' : String(target.rangeStart)"
+                    class="upload-collection-count"
+                    type="number"
+                    size="lg"
+                    min="1"
+                    :disabled="uploadDistributionMode === 'even'"
+                    placeholder="Start"
+                    @update:model-value="updateUploadCollectionRangePoint(index, 'rangeStart', $event)"
+                  />
+                  <UInput
+                    :model-value="target.rangeEnd == null ? '' : String(target.rangeEnd)"
+                    class="upload-collection-count"
+                    type="number"
+                    size="lg"
+                    min="1"
+                    :disabled="uploadDistributionMode === 'even'"
+                    placeholder="End"
+                    @update:model-value="updateUploadCollectionRangePoint(index, 'rangeEnd', $event)"
+                  />
+                  <UButton
+                    color="neutral"
+                    variant="soft"
+                    size="lg"
+                    icon="i-lucide-link"
+                    @click="syncUploadCollectionUrl(index)"
+                  >
+                    Sync URL
+                  </UButton>
+                  <UButton
+                    color="error"
+                    variant="soft"
+                    size="lg"
+                    icon="i-lucide-trash-2"
+                    @click="removeUploadCollection(index)"
+                  >
+                    Remove
+                  </UButton>
+                </div>
+              </div>
+
+              <div class="upload-collections-actions">
+                <UButton
+                  color="neutral"
+                  variant="soft"
+                  size="lg"
+                  icon="i-lucide-plus"
+                  @click="addUploadCollection"
+                >
+                  Add collection
+                </UButton>
+                <UButton
+                  color="neutral"
+                  variant="soft"
+                  size="lg"
+                  icon="i-lucide-link"
+                  @click="syncAllUploadCollectionUrls"
+                >
+                  Sync all from BASE_URL
+                </UButton>
                 <UButton
                   color="primary"
                   size="lg"
                   :loading="isSavingCreateUrl"
-                  @click="saveCreateUrl"
+                  @click="saveUploadCollections"
                 >
-                  Save URL
+                  Save collections
                 </UButton>
+              </div>
+
+              <div v-if="plannedUploadBreakdown.targets.length" class="upload-plan-panel">
+                <div class="global-tags-head">
+                  <p class="field-label">Upload split preview</p>
+                  <UBadge color="neutral" variant="soft">
+                    {{ plannedUploadBreakdown.assignedCount }} / {{ configItems.length }} assigned
+                  </UBadge>
+                </div>
+
+                <div class="upload-plan-list">
+                  <div
+                    v-for="(target, index) in plannedUploadBreakdown.targets"
+                    :key="`upload-plan-${index}`"
+                    class="upload-plan-item"
+                  >
+                    <div>
+                      <p class="upload-plan-title">{{ target.label }}</p>
+                      <p class="muted-text">{{ target.createUrl }}</p>
+                    </div>
+                    <UBadge color="primary" variant="soft">
+                      {{ target.rangeText }} • {{ target.assignedCount }} asset(s)
+                    </UBadge>
+                  </div>
+                </div>
+
+                <p v-if="plannedUploadBreakdown.unassignedCount" class="muted-text">
+                  {{ plannedUploadBreakdown.unassignedCount }} asset(s) are still outside the
+                  current upload plan.
+                </p>
               </div>
             </div>
 
@@ -1404,26 +1822,20 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="field-block">
-              <p class="field-label">COLLECTION ID</p>
+              <p class="field-label">PRIMARY COLLECTION</p>
               <UInput
-                v-model="collectionId"
+                :model-value="normalizedUploadCollections[0]?.collectionId || ''"
                 size="lg"
-                placeholder="10802cfc-dc6e-4506-9ca2-abfe83d64506"
-                @blur="applyCollectionToCreateUrl"
+                readonly
+                placeholder="Add collections in the main Upload collections panel"
               />
             </div>
 
             <div class="field-block field-action">
-              <UButton
-                class="w-full"
-                size="lg"
-                color="neutral"
-                variant="soft"
-                icon="i-lucide-link"
-                @click="applyCollectionToCreateUrl"
-              >
-                Sync CREATE_URL
-              </UButton>
+              <p class="muted-text">
+                CREATE_URL and COLLECTION_ID are synced automatically from the first upload
+                collection when you save.
+              </p>
             </div>
           </div>
 
@@ -1689,6 +2101,90 @@ onBeforeUnmount(() => {
 .create-url-field {
   flex: 1 1 360px;
   min-width: 0;
+}
+
+.upload-collections-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.upload-collections-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.distribution-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.upload-collections-list {
+  display: grid;
+  gap: 10px;
+}
+
+.upload-collection-row {
+  display: grid;
+  gap: 10px;
+  grid-template-columns:
+    minmax(180px, 0.8fr)
+    minmax(280px, 1.5fr)
+    120px
+    120px
+    auto
+    auto;
+  align-items: center;
+}
+
+.upload-collection-id,
+.upload-collection-url,
+.upload-collection-count {
+  min-width: 0;
+}
+
+.upload-collections-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.upload-plan-panel {
+  border: 1px solid rgba(71, 85, 105, 0.45);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.38);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.upload-plan-list {
+  display: grid;
+  gap: 8px;
+}
+
+.upload-plan-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.48);
+  border: 1px solid rgba(71, 85, 105, 0.35);
+}
+
+.upload-plan-title {
+  margin: 0 0 4px;
+  font-size: 0.94rem;
+  font-weight: 600;
 }
 
 .global-tags-panel {
@@ -2092,11 +2588,27 @@ onBeforeUnmount(() => {
   .media-cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .upload-collection-row {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-plan-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 @media (max-width: 640px) {
   .media-cards {
     grid-template-columns: 1fr;
+  }
+
+  .upload-collections-actions,
+  .upload-collections-badges,
+  .distribution-mode-row {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 </style>

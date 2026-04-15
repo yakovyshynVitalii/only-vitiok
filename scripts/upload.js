@@ -1,15 +1,14 @@
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
+const { parseUploadTargets, planUploads } = require("./upload-targets");
 
 function getEnv() {
-  const createUrl = process.env.CREATE_URL;
-  if (!createUrl) {
-    throw new Error("CREATE_URL is missing. Add CREATE_URL to .env");
-  }
+  const { distributionMode, targets } = parseUploadTargets(process.env);
 
   return {
-    CREATE_URL: createUrl,
+    distributionMode,
+    uploadTargets: targets,
     MEDIA_CONFIG_PATH: path.resolve(
       process.env.MEDIA_CONFIG_PATH || "./media-config.json"
     ),
@@ -54,6 +53,22 @@ function writeConfig(config, env) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getStorageStatePath() {
+  return path.resolve("state.json");
+}
+
+function ensureStorageStateExists() {
+  const storageStatePath = getStorageStatePath();
+
+  if (!fs.existsSync(storageStatePath)) {
+    throw new Error(
+      "state.json is missing. Click Login, sign in in the browser, then click Finish login before running Upload."
+    );
+  }
+
+  return storageStatePath;
 }
 
 function isFileInputDetachTimeout(err) {
@@ -201,12 +216,37 @@ async function fillMetadata(page, item) {
   await applyExistingHashtags(page, item.hashtags);
 }
 
+async function findVisibleButton(page, selectors) {
+  for (const selector of selectors) {
+    const matches = page.locator(selector);
+    const count = await matches.count().catch(() => 0);
+    if (!count) continue;
+
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const button = matches.nth(index);
+      const visible = await button.isVisible().catch(() => false);
+      if (visible) return button;
+    }
+  }
+
+  return null;
+}
+
 async function clickDoneButton(page) {
-  const doneButton = page
-    .locator(
-      'button:has-text("Done"):visible'
-    )
-    .first();
+  const doneButton = await findVisibleButton(page, [
+    'button:has-text("Done")',
+    'button:has-text("Готово")',
+    'button:has-text("Save")',
+    'button:has-text("Сохранить")',
+    'button[aria-label*="done" i]',
+    'button[aria-label*="готов" i]',
+    'button[aria-label*="save" i]',
+    'button[aria-label*="сохран" i]',
+  ]);
+
+  if (!doneButton) {
+    throw new Error("Could not find Done/Готово button in upload modal.");
+  }
 
   await doneButton.waitFor({ state: "visible", timeout: 60000 });
   await doneButton.scrollIntoViewIfNeeded().catch(() => {});
@@ -229,7 +269,7 @@ async function clickDoneButton(page) {
 async function openUploadModal(page) {
   const openButtons = [
     "button:has(.i-majesticons\\:plus-line)",
-    'button:has-text("Add"), button:has-text("Upload")',
+    'button:has-text("Add"), button:has-text("Upload"), button:has-text("Добавить"), button:has-text("Загрузить"), button:has-text("Добавить медиа")',
   ];
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -263,9 +303,21 @@ async function openUploadModal(page) {
 async function runUploadOnce() {
   loadDotEnv();
   const env = getEnv();
+  const storageStatePath = ensureStorageStateExists();
 
   const config = readConfig(env);
   const pendingItems = config.items.filter((item) => !item.uploaded);
+  const uploadPlan = planUploads(
+    config.items,
+    env.uploadTargets,
+    env.distributionMode
+  );
+  const pendingPlan = uploadPlan.plans
+    .map((targetPlan) => ({
+      ...targetPlan,
+      pendingItems: targetPlan.items.filter((item) => !item.uploaded),
+    }))
+    .filter((targetPlan) => targetPlan.pendingItems.length > 0);
 
   if (!pendingItems.length) {
     console.log("✅ All files in config are already uploaded");
@@ -277,80 +329,103 @@ async function runUploadOnce() {
     return { retryRequested: false };
   }
 
+  if (!pendingPlan.length) {
+    throw new Error(
+      "No pending assets are assigned to upload collections. Increase asset counts or add another collection."
+    );
+  }
+
   const browser = await chromium.launch({
     headless: env.HEADLESS,
     slowMo: env.ACTION_DELAY_MS,
   });
-  const context = await browser.newContext({ storageState: "state.json" });
+  const context = await browser.newContext({ storageState: storageStatePath });
   const page = await context.newPage();
   let retryRequested = false;
   let lastErrorMessage = "";
 
-  await page.goto(env.CREATE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForLoadState("networkidle").catch(() => {});
-  await page.waitForTimeout(2000);
+  for (const targetPlan of pendingPlan) {
+    console.log(
+      `\n🌐 Collection ${targetPlan.targetIndex + 1}: ${targetPlan.label} (${targetPlan.pendingItems.length} file(s))`
+    );
 
-  for (const item of pendingItems) {
-    const filePath = item.filePath;
+    await page.goto(targetPlan.createUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+    await page.waitForLoadState("networkidle").catch(() => {});
+    await page.waitForTimeout(2000);
 
-    if (!fs.existsSync(filePath)) {
-      console.log(`⚠️  File is missing, skipping: ${filePath}`);
-      item.uploaded = true;
-      item.error = "file_missing";
-      writeConfig(config, env);
-      continue;
-    }
+    for (const item of targetPlan.pendingItems) {
+      const filePath = item.filePath;
 
-    const fileSizeBytes = fs.statSync(filePath).size;
-    const MAX_FILE_SIZE = 900 * 1024 * 1024; // 900 MB — platform limit is 1 GB, keep margin
-    if (fileSizeBytes > MAX_FILE_SIZE) {
-      const sizeMB = (fileSizeBytes / (1024 * 1024)).toFixed(0);
-      console.log(`⚠️  File too large (${sizeMB} MB > 1 GB), skipping: ${path.basename(filePath)}`);
-      item.uploaded = true;
-      item.error = `file_too_large_${sizeMB}MB`;
-      writeConfig(config, env);
-      continue;
-    }
-
-    console.log(`\n📂 Next file: ${filePath}`);
-
-    try {
-      await openUploadModal(page);
-
-      const fileInput = page.locator('input[type="file"]');
-      await fileInput.setInputFiles(filePath);
-
-      await fillMetadata(page, item);
-
-      await clickDoneButton(page);
-
-      await page.locator('input[type="file"]').waitFor({
-        state: "detached",
-        timeout: 60000,
-      });
-
-      item.uploaded = true;
-      item.uploadedAt = new Date().toISOString();
-      delete item.error;
-      writeConfig(config, env);
-
-      console.log(`✅ Uploaded: ${filePath}`);
-
-      await page.waitForTimeout(5000);
-    } catch (err) {
-      item.error = err.message;
-      writeConfig(config, env);
-      console.log(`❌ File error: ${filePath}`);
-      console.log(err.message);
-      lastErrorMessage = err.message || "unknown_upload_error";
-
-      if (isFileInputDetachTimeout(err)) {
-        retryRequested = true;
-        console.log(
-          "⏳ File input detach timeout received. Upload will restart in 60 seconds."
-        );
+      if (!fs.existsSync(filePath)) {
+        console.log(`⚠️  File is missing, skipping: ${filePath}`);
+        item.uploaded = true;
+        item.error = "file_missing";
+        writeConfig(config, env);
+        continue;
       }
 
+      const fileSizeBytes = fs.statSync(filePath).size;
+      const MAX_FILE_SIZE = 900 * 1024 * 1024; // 900 MB — platform limit is 1 GB, keep margin
+      if (fileSizeBytes > MAX_FILE_SIZE) {
+        const sizeMB = (fileSizeBytes / (1024 * 1024)).toFixed(0);
+        console.log(
+          `⚠️  File too large (${sizeMB} MB > 1 GB), skipping: ${path.basename(filePath)}`
+        );
+        item.uploaded = true;
+        item.error = `file_too_large_${sizeMB}MB`;
+        writeConfig(config, env);
+        continue;
+      }
+
+      console.log(`\n📂 Next file: ${filePath}`);
+
+      try {
+        await openUploadModal(page);
+
+        const fileInput = page.locator('input[type="file"]');
+        await fileInput.setInputFiles(filePath);
+
+        await fillMetadata(page, item);
+
+        await clickDoneButton(page);
+
+        await page.locator('input[type="file"]').waitFor({
+          state: "detached",
+          timeout: 60000,
+        });
+
+        item.uploaded = true;
+        item.uploadedAt = new Date().toISOString();
+        item.uploadCollectionId = targetPlan.collectionId || "";
+        item.uploadCreateUrl = targetPlan.createUrl;
+        delete item.error;
+        writeConfig(config, env);
+
+        console.log(`✅ Uploaded: ${filePath}`);
+
+        await page.waitForTimeout(5000);
+      } catch (err) {
+        item.error = err.message;
+        writeConfig(config, env);
+        console.log(`❌ File error: ${filePath}`);
+        console.log(err.message);
+        lastErrorMessage = err.message || "unknown_upload_error";
+
+        if (isFileInputDetachTimeout(err)) {
+          retryRequested = true;
+          console.log(
+            "⏳ File input detach timeout received. Upload will restart in 60 seconds."
+          );
+        }
+
+        break;
+      }
+    }
+
+    if (lastErrorMessage || retryRequested) {
       break;
     }
   }
@@ -372,6 +447,10 @@ async function runUploadOnce() {
   if (finalConfig.items.every((item) => item.uploaded)) {
     console.log("✅ All files in config are already uploaded");
     notifyUploadFinished();
+  } else if (uploadPlan.unassignedItems.length > 0) {
+    console.log(
+      `ℹ️  Left pending without upload slot: ${uploadPlan.unassignedItems.filter((item) => !item.uploaded).length}`
+    );
   }
 
   return { retryRequested: false };

@@ -142,3 +142,60 @@ export function syncMediaConfig(
     syncedItems,
   };
 }
+
+export function resetConfigAnalysisState(settings: AppSettings): {
+  configPath: string;
+  itemCount: number;
+  cleared: boolean;
+} {
+  const configPath = getConfigPath(settings);
+
+  if (!fs.existsSync(configPath)) {
+    return {
+      configPath,
+      itemCount: 0,
+      cleared: false,
+    };
+  }
+
+  let existingConfig: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (parsed && typeof parsed === "object") {
+      existingConfig = parsed as Record<string, unknown>;
+    }
+  } catch {
+    existingConfig = {};
+  }
+
+  const existingItems = Array.isArray(existingConfig.items)
+    ? (existingConfig.items as ConfigItem[])
+    : [];
+
+  const nextItems = existingItems.map((item) => ({
+    ...item,
+    title: "",
+    description: "",
+    hashtags: [],
+    trendTermsUsed: [],
+    trendScore: 0,
+    contentSummary: "",
+    vip: false,
+    uploaded: false,
+  }));
+
+  const nextConfig = {
+    ...existingConfig,
+    generatedAt: new Date().toISOString(),
+    hashtags: [],
+    items: nextItems,
+  };
+
+  fs.writeFileSync(configPath, JSON.stringify(nextConfig, null, 2), "utf8");
+
+  return {
+    configPath,
+    itemCount: nextItems.length,
+    cleared: true,
+  };
+}
