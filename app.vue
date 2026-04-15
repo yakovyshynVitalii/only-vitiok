@@ -49,6 +49,7 @@ interface ConfigItem {
   uploaded?: boolean;
   uploadCollectionId?: string;
   uploadCreateUrl?: string;
+  analysisAttempted?: boolean;
 }
 
 interface TaskStatusResponse {
@@ -91,6 +92,7 @@ const isScanningMedia = ref(false);
 const isConfigDrawerOpen = ref(false);
 const isLogsDrawerOpen = ref(false);
 const canResumeAnalyze = ref(false);
+const isAnalyzeAutoTracking = ref(false);
 
 const collectionModelName = ref("");
 const collectionGenTitle = ref("");
@@ -103,6 +105,8 @@ const lastPickedFiles = ref(0);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const tagDraftByIndex = reactive<Record<number, string>>({});
 let analyzeLiveSyncTimer: ReturnType<typeof setInterval> | null = null;
+const analysisRateSamples = ref<{ at: number; attempted: number }[]>([]);
+const ANALYSIS_RATE_WINDOW_MS = 120_000;
 
 const MANAGED_ENV_KEYS = new Set([
   "BASE_URL",
@@ -164,12 +168,102 @@ function isItemAnalyzed(item: ConfigItem): boolean {
   return Boolean(title && description && hashtags.length);
 }
 
+function isItemAttempted(item: ConfigItem): boolean {
+  if (item.analysisAttempted) return true;
+  return isItemAnalyzed(item);
+}
+
 const analysisProgress = computed(() => {
   const total = configItems.value.length;
   const done = configItems.value.filter((item) => isItemAnalyzed(item)).length;
   const percent = total ? Math.round((done / total) * 100) : 0;
 
   return { total, done, percent };
+});
+
+const analysisAttemptedProgress = computed(() => {
+  const total = configItems.value.length;
+  const done = configItems.value.filter((item) => isItemAttempted(item)).length;
+  const percent = total ? Math.round((done / total) * 100) : 0;
+
+  return { total, done, percent };
+});
+
+function trimRateSamples() {
+  const cutoff = Date.now() - ANALYSIS_RATE_WINDOW_MS;
+  const samples = analysisRateSamples.value;
+  while (samples.length && samples[0].at < cutoff) {
+    samples.shift();
+  }
+  if (samples.length > 120) {
+    samples.splice(0, samples.length - 120);
+  }
+}
+
+function pushRateSample(attempted: number) {
+  const now = Date.now();
+  const samples = analysisRateSamples.value;
+  const last = samples[samples.length - 1];
+
+  if (last && last.attempted === attempted && now - last.at < 1000) {
+    return;
+  }
+
+  samples.push({ at: now, attempted });
+  trimRateSamples();
+}
+
+function resetRateSamples() {
+  analysisRateSamples.value = [];
+}
+
+const analysisItemsPerMinute = computed(() => {
+  if (!isRunningAnalyze.value) return 0;
+
+  const samples = analysisRateSamples.value;
+  if (samples.length < 2) return 0;
+
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const deltaItems = last.attempted - first.attempted;
+  const deltaMinutes = (last.at - first.at) / 60_000;
+
+  if (deltaItems <= 0 || deltaMinutes <= 0) return 0;
+  return deltaItems / deltaMinutes;
+});
+
+const analysisEtaMinutes = computed(() => {
+  const speed = analysisItemsPerMinute.value;
+  const remaining = analysisAttemptedProgress.value.total - analysisAttemptedProgress.value.done;
+  if (remaining <= 0) return 0;
+  if (speed <= 0) return null;
+  return remaining / speed;
+});
+
+function formatEta(minutes: number): string {
+  const totalSeconds = Math.max(0, Math.round(minutes * 60));
+  const hh = Math.floor(totalSeconds / 3600);
+  const mm = Math.floor((totalSeconds % 3600) / 60);
+  const ss = totalSeconds % 60;
+
+  if (hh > 0) {
+    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  }
+
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+const analysisRateText = computed(() => {
+  const speed = analysisItemsPerMinute.value;
+  if (!isRunningAnalyze.value) return "";
+  if (speed <= 0) return "Speed: calculating...";
+  return `Speed: ${speed.toFixed(1)} items/min`;
+});
+
+const analysisEtaText = computed(() => {
+  if (!isRunningAnalyze.value) return "";
+  if (analysisEtaMinutes.value === null) return "ETA: --";
+  return `ETA: ${formatEta(analysisEtaMinutes.value)}`;
 });
 
 const configItems = computed<ConfigItem[]>(() => {
@@ -953,6 +1047,21 @@ async function loadTaskStatus() {
   const status = await $fetch<TaskStatusResponse>("/api/run/status");
   runningTask.value = status.runningTask;
   isBusy.value = status.isBusy;
+
+  const isAnalyzeTaskRunning = status.runningTask === "analyze";
+  if (isAnalyzeTaskRunning && !isRunningAnalyze.value) {
+    isRunningAnalyze.value = true;
+    isAnalyzeAutoTracking.value = true;
+    canResumeAnalyze.value = false;
+    startAnalyzeLiveSync();
+  }
+
+  if (!isAnalyzeTaskRunning && isAnalyzeAutoTracking.value) {
+    isAnalyzeAutoTracking.value = false;
+    isRunningAnalyze.value = false;
+    stopAnalyzeLiveSync();
+    void Promise.all([loadConfig(), loadMedia()]).catch(() => {});
+  }
 }
 
 function stopAnalyzeLiveSync() {
@@ -1023,6 +1132,7 @@ async function copyCollectionMeta() {
 
 async function startAnalyze() {
   canResumeAnalyze.value = false;
+  isAnalyzeAutoTracking.value = false;
   isRunningAnalyze.value = true;
   startAnalyzeLiveSync();
 
@@ -1069,6 +1179,7 @@ async function startAnalyze() {
     }
     await loadTaskStatus();
   } finally {
+    isAnalyzeAutoTracking.value = false;
     stopAnalyzeLiveSync();
     isRunningAnalyze.value = false;
   }
@@ -1158,6 +1269,26 @@ watch(
     if (parsed) {
       configData.value = parsed;
     }
+  }
+);
+
+watch(
+  () => isRunningAnalyze.value,
+  (running) => {
+    if (!running) {
+      resetRateSamples();
+      return;
+    }
+    resetRateSamples();
+    pushRateSample(analysisAttemptedProgress.value.done);
+  }
+);
+
+watch(
+  () => analysisAttemptedProgress.value.done,
+  (done) => {
+    if (!isRunningAnalyze.value) return;
+    pushRateSample(done);
   }
 );
 
@@ -1643,8 +1774,14 @@ onBeforeUnmount(() => {
                     {{ isRunningAnalyze ? "Analysis in progress" : "Analysis stopped" }}
                   </span>
                   <span class="muted-text">
+                    {{ analysisAttemptedProgress.done }} / {{ analysisAttemptedProgress.total }} attempted
+                    ({{ analysisAttemptedProgress.percent }}%)
+                  </span>
+                  <span class="muted-text">
                     {{ analysisProgress.done }} / {{ analysisProgress.total }} analyzed
-                    ({{ analysisProgress.percent }}%)
+                  </span>
+                  <span v-if="isRunningAnalyze" class="muted-text">
+                    {{ analysisRateText }} | {{ analysisEtaText }}
                   </span>
                 </div>
 
@@ -1672,7 +1809,7 @@ onBeforeUnmount(() => {
                 </UButton>
               </div>
 
-              <UProgress :model-value="analysisProgress.percent" />
+              <UProgress :model-value="analysisAttemptedProgress.percent" />
             </div>
 
             <div class="media-cards">
