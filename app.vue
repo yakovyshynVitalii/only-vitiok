@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 
 interface SettingsResponse {
   env: Record<string, string>;
   envText: string;
   collectionId: string;
   autoUploadAfterAnalyze: boolean;
+  globalTagLimit: number;
   uploadDistributionMode: UploadDistributionMode;
   uploadCollections: UploadCollectionTarget[];
 }
@@ -49,7 +50,6 @@ interface ConfigItem {
   uploaded?: boolean;
   uploadCollectionId?: string;
   uploadCreateUrl?: string;
-  analysisAttempted?: boolean;
 }
 
 interface TaskStatusResponse {
@@ -62,6 +62,7 @@ const envMap = reactive<Record<string, string>>({});
 const uploadCollections = ref<UploadCollectionTarget[]>([]);
 const uploadDistributionMode = ref<UploadDistributionMode>("range");
 const autoUploadAfterAnalyze = ref(false);
+const globalTagLimit = ref<15 | 100>(15);
 
 const stateExists = ref(false);
 const loginSessionActive = ref(false);
@@ -74,6 +75,9 @@ const isBusy = ref(false);
 const infoMessage = ref("");
 const errorMessage = ref("");
 const runLog = ref("");
+
+const mediaPage = ref(1);
+const MEDIA_PAGE_SIZE = 24;
 
 const isSavingSettings = ref(false);
 const isSavingCreateUrl = ref(false);
@@ -92,9 +96,8 @@ const isScanningMedia = ref(false);
 const isConfigDrawerOpen = ref(false);
 const isLogsDrawerOpen = ref(false);
 const canResumeAnalyze = ref(false);
-const isAnalyzeAutoTracking = ref(false);
 
-const collectionModelName = ref("");
+const collectionPrompt = ref("");
 const collectionGenTitle = ref("");
 const collectionGenDescription = ref("");
 const isGeneratingCollection = ref(false);
@@ -105,8 +108,12 @@ const lastPickedFiles = ref(0);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const tagDraftByIndex = reactive<Record<number, string>>({});
 let analyzeLiveSyncTimer: ReturnType<typeof setInterval> | null = null;
-const analysisRateSamples = ref<{ at: number; attempted: number }[]>([]);
-const ANALYSIS_RATE_WINDOW_MS = 120_000;
+let collectionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function debouncedSaveCollections() {
+  if (collectionSaveTimer) clearTimeout(collectionSaveTimer);
+  collectionSaveTimer = setTimeout(() => saveUploadCollections(), 800);
+}
 
 const MANAGED_ENV_KEYS = new Set([
   "BASE_URL",
@@ -130,11 +137,7 @@ const baseUrl = computed({
   },
 });
 
-const loginStatusText = computed(() => {
-  if (stateExists.value) return "Logged in (state.json found)";
-  if (loginSessionActive.value) return "Login session is active";
-  return "Not logged in";
-});
+
 
 const loginButtonText = computed(() => {
   if (stateExists.value) return "Logout";
@@ -155,10 +158,7 @@ const pendingActions = computed(
     isHandlingLogin.value
 );
 
-const pickedFileText = computed(() => {
-  if (!lastPickedFiles.value) return "No file selected";
-  return `${lastPickedFiles.value} file(s) selected`;
-});
+
 
 function isItemAnalyzed(item: ConfigItem): boolean {
   const title = String(item.title || "").trim();
@@ -166,11 +166,6 @@ function isItemAnalyzed(item: ConfigItem): boolean {
   const hashtags = Array.isArray(item.hashtags) ? item.hashtags : [];
 
   return Boolean(title && description && hashtags.length);
-}
-
-function isItemAttempted(item: ConfigItem): boolean {
-  if (item.analysisAttempted) return true;
-  return isItemAnalyzed(item);
 }
 
 const analysisProgress = computed(() => {
@@ -181,94 +176,25 @@ const analysisProgress = computed(() => {
   return { total, done, percent };
 });
 
-const analysisAttemptedProgress = computed(() => {
-  const total = configItems.value.length;
-  const done = configItems.value.filter((item) => isItemAttempted(item)).length;
-  const percent = total ? Math.round((done / total) * 100) : 0;
-
-  return { total, done, percent };
-});
-
-function trimRateSamples() {
-  const cutoff = Date.now() - ANALYSIS_RATE_WINDOW_MS;
-  const samples = analysisRateSamples.value;
-  while (samples.length && samples[0].at < cutoff) {
-    samples.shift();
-  }
-  if (samples.length > 120) {
-    samples.splice(0, samples.length - 120);
-  }
-}
-
-function pushRateSample(attempted: number) {
-  const now = Date.now();
-  const samples = analysisRateSamples.value;
-  const last = samples[samples.length - 1];
-
-  if (last && last.attempted === attempted && now - last.at < 1000) {
-    return;
-  }
-
-  samples.push({ at: now, attempted });
-  trimRateSamples();
-}
-
-function resetRateSamples() {
-  analysisRateSamples.value = [];
-}
-
-const analysisItemsPerMinute = computed(() => {
-  if (!isRunningAnalyze.value) return 0;
-
-  const samples = analysisRateSamples.value;
-  if (samples.length < 2) return 0;
-
-  const first = samples[0];
-  const last = samples[samples.length - 1];
-  const deltaItems = last.attempted - first.attempted;
-  const deltaMinutes = (last.at - first.at) / 60_000;
-
-  if (deltaItems <= 0 || deltaMinutes <= 0) return 0;
-  return deltaItems / deltaMinutes;
-});
-
-const analysisEtaMinutes = computed(() => {
-  const speed = analysisItemsPerMinute.value;
-  const remaining = analysisAttemptedProgress.value.total - analysisAttemptedProgress.value.done;
-  if (remaining <= 0) return 0;
-  if (speed <= 0) return null;
-  return remaining / speed;
-});
-
-function formatEta(minutes: number): string {
-  const totalSeconds = Math.max(0, Math.round(minutes * 60));
-  const hh = Math.floor(totalSeconds / 3600);
-  const mm = Math.floor((totalSeconds % 3600) / 60);
-  const ss = totalSeconds % 60;
-
-  if (hh > 0) {
-    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
-  }
-
-  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
-}
-
-const analysisRateText = computed(() => {
-  const speed = analysisItemsPerMinute.value;
-  if (!isRunningAnalyze.value) return "";
-  if (speed <= 0) return "Speed: calculating...";
-  return `Speed: ${speed.toFixed(1)} items/min`;
-});
-
-const analysisEtaText = computed(() => {
-  if (!isRunningAnalyze.value) return "";
-  if (analysisEtaMinutes.value === null) return "ETA: --";
-  return `ETA: ${formatEta(analysisEtaMinutes.value)}`;
-});
-
 const configItems = computed<ConfigItem[]>(() => {
   const items = (configData.value as { items?: unknown[] } | null)?.items;
   return Array.isArray(items) ? (items as ConfigItem[]) : [];
+});
+
+const mediaTotalPages = computed(() =>
+  Math.max(1, Math.ceil(configItems.value.length / MEDIA_PAGE_SIZE))
+);
+
+const paginatedItems = computed(() => {
+  const start = (mediaPage.value - 1) * MEDIA_PAGE_SIZE;
+  return configItems.value.slice(start, start + MEDIA_PAGE_SIZE);
+});
+
+// Reset page when items change significantly
+watch(() => configItems.value.length, () => {
+  if (mediaPage.value > mediaTotalPages.value) {
+    mediaPage.value = mediaTotalPages.value;
+  }
 });
 
 const globalTags = computed(() => {
@@ -303,9 +229,9 @@ const globalTags = computed(() => {
 const normalizedUploadCollections = computed<UploadCollectionTarget[]>(() =>
   uploadCollections.value
     .map((target) => {
-      const collectionId = String(target.collectionId || "").trim();
-      const createUrl =
-        String(target.createUrl || "").trim() || deriveCreateUrl(baseUrl.value, collectionId);
+      const rawUrl = stripLocaleFromCollectionUrl(String(target.createUrl || "").trim());
+      const collectionId = String(target.collectionId || "").trim() || extractCollectionIdFromUrl(rawUrl);
+      const createUrl = rawUrl || deriveCreateUrl(baseUrl.value, collectionId);
       const rangeStart = normalizeRangePoint(target.rangeStart);
       let rangeEnd = normalizeRangePoint(target.rangeEnd);
 
@@ -509,9 +435,13 @@ function parseConfigData(text: string): Record<string, unknown> | null {
   }
 }
 
+let isSyncingFromData = false;
+
 function syncConfigTextFromData() {
   if (!configData.value) return;
+  isSyncingFromData = true;
   configText.value = JSON.stringify(configData.value, null, 2);
+  nextTick(() => { isSyncingFromData = false; });
 }
 
 function deriveCreateUrl(base: string, collection: string): string {
@@ -520,6 +450,15 @@ function deriveCreateUrl(base: string, collection: string): string {
 
   if (!trimmedBase || !trimmedCollection) return "";
   return `${trimmedBase}/collection/${trimmedCollection}`;
+}
+
+function stripLocaleFromCollectionUrl(url: string): string {
+  return String(url || "").replace(/\/[a-z]{2}(\/collection\/)/i, "$1");
+}
+
+function extractCollectionIdFromUrl(url: string): string {
+  const match = String(url || "").match(/\/collection\/([^/?#]+)/i);
+  return match?.[1] ?? "";
 }
 
 function normalizeAssetCount(value: unknown): number | null {
@@ -551,7 +490,7 @@ function createEmptyUploadCollection(): UploadCollectionTarget {
 function cloneUploadCollections(): UploadCollectionTarget[] {
   return uploadCollections.value.map((target) => ({
     collectionId: String(target.collectionId || "").trim(),
-    createUrl: String(target.createUrl || "").trim(),
+    createUrl: stripLocaleFromCollectionUrl(String(target.createUrl || "").trim()),
     rangeStart: normalizeRangePoint(target.rangeStart),
     rangeEnd: normalizeRangePoint(target.rangeEnd),
   }));
@@ -560,27 +499,27 @@ function cloneUploadCollections(): UploadCollectionTarget[] {
 function getUploadCollectionLabel(target: UploadCollectionTarget, index: number): string {
   return (
     String(target.collectionId || "").trim() ||
-    String(target.createUrl || "")
-      .match(/\/collection\/([^/?#]+)/i)?.[1] ||
+    extractCollectionIdFromUrl(target.createUrl) ||
     `Collection ${index + 1}`
   );
 }
 
-function syncUploadCollectionUrl(index: number) {
+function handleCollectionUrlInput(index: number, rawUrl: string) {
   const target = uploadCollections.value[index];
   if (!target) return;
 
-  const generated = deriveCreateUrl(baseUrl.value, target.collectionId);
-  if (generated) {
-    target.createUrl = generated;
+  const cleanUrl = stripLocaleFromCollectionUrl(rawUrl.trim());
+  target.createUrl = cleanUrl;
+  const extractedId = extractCollectionIdFromUrl(cleanUrl);
+  if (extractedId) {
+    target.collectionId = extractedId;
   }
+  debouncedSaveCollections();
 }
 
-function syncAllUploadCollectionUrls() {
-  for (let index = 0; index < uploadCollections.value.length; index += 1) {
-    syncUploadCollectionUrl(index);
-  }
-}
+
+
+
 
 function addUploadCollection() {
   uploadCollections.value.push(createEmptyUploadCollection());
@@ -588,6 +527,7 @@ function addUploadCollection() {
 
 function removeUploadCollection(index: number) {
   uploadCollections.value.splice(index, 1);
+  saveUploadCollections();
 }
 
 function updateUploadCollectionRangePoint(
@@ -598,6 +538,7 @@ function updateUploadCollectionRangePoint(
   const target = uploadCollections.value[index];
   if (!target) return;
   target[field] = normalizeRangePoint(value);
+  debouncedSaveCollections();
 }
 
 function formatTargetRange(
@@ -694,9 +635,11 @@ async function loadSettings() {
       }))
     : [];
   autoUploadAfterAnalyze.value = settings.autoUploadAfterAnalyze;
+  globalTagLimit.value = settings.globalTagLimit === 100 ? 100 : 15;
   envMap.AUTO_UPLOAD_AFTER_ANALYZE = settings.autoUploadAfterAnalyze
     ? "true"
     : "false";
+  envMap.GLOBAL_TAG_LIMIT = String(globalTagLimit.value);
 }
 
 async function saveSettings() {
@@ -706,6 +649,7 @@ async function saveSettings() {
     envMap.AUTO_UPLOAD_AFTER_ANALYZE = autoUploadAfterAnalyze.value
       ? "true"
       : "false";
+    envMap.GLOBAL_TAG_LIMIT = String(globalTagLimit.value);
 
     const saved = await $fetch<SettingsResponse>("/api/settings", {
       method: "PUT",
@@ -713,6 +657,7 @@ async function saveSettings() {
         env: cloneEnvMap(),
         collectionId: normalizedUploadCollections.value[0]?.collectionId || "",
         autoUploadAfterAnalyze: autoUploadAfterAnalyze.value,
+        globalTagLimit: globalTagLimit.value,
         uploadDistributionMode: uploadDistributionMode.value,
         uploadCollections: cloneUploadCollections(),
       },
@@ -722,6 +667,7 @@ async function saveSettings() {
     uploadDistributionMode.value = saved.uploadDistributionMode || "range";
     uploadCollections.value = saved.uploadCollections || [];
     autoUploadAfterAnalyze.value = saved.autoUploadAfterAnalyze;
+    globalTagLimit.value = saved.globalTagLimit === 100 ? 100 : 15;
     isSettingsOpen.value = false;
     setMessage("Settings saved.");
   } catch (error) {
@@ -738,6 +684,7 @@ async function saveUploadCollections() {
     envMap.AUTO_UPLOAD_AFTER_ANALYZE = autoUploadAfterAnalyze.value
       ? "true"
       : "false";
+    envMap.GLOBAL_TAG_LIMIT = String(globalTagLimit.value);
 
     const saved = await $fetch<SettingsResponse>("/api/settings", {
       method: "PUT",
@@ -745,6 +692,7 @@ async function saveUploadCollections() {
         env: cloneEnvMap(),
         collectionId: normalizedUploadCollections.value[0]?.collectionId || "",
         autoUploadAfterAnalyze: autoUploadAfterAnalyze.value,
+        globalTagLimit: globalTagLimit.value,
         uploadDistributionMode: uploadDistributionMode.value,
         uploadCollections: cloneUploadCollections(),
       },
@@ -754,6 +702,7 @@ async function saveUploadCollections() {
     uploadDistributionMode.value = saved.uploadDistributionMode || "range";
     uploadCollections.value = saved.uploadCollections || [];
     autoUploadAfterAnalyze.value = saved.autoUploadAfterAnalyze;
+    globalTagLimit.value = saved.globalTagLimit === 100 ? 100 : 15;
     setMessage("Upload collections saved.");
   } catch (error) {
     setError(error);
@@ -1047,21 +996,6 @@ async function loadTaskStatus() {
   const status = await $fetch<TaskStatusResponse>("/api/run/status");
   runningTask.value = status.runningTask;
   isBusy.value = status.isBusy;
-
-  const isAnalyzeTaskRunning = status.runningTask === "analyze";
-  if (isAnalyzeTaskRunning && !isRunningAnalyze.value) {
-    isRunningAnalyze.value = true;
-    isAnalyzeAutoTracking.value = true;
-    canResumeAnalyze.value = false;
-    startAnalyzeLiveSync();
-  }
-
-  if (!isAnalyzeTaskRunning && isAnalyzeAutoTracking.value) {
-    isAnalyzeAutoTracking.value = false;
-    isRunningAnalyze.value = false;
-    stopAnalyzeLiveSync();
-    void Promise.all([loadConfig(), loadMedia()]).catch(() => {});
-  }
 }
 
 function stopAnalyzeLiveSync() {
@@ -1082,9 +1016,9 @@ function startAnalyzeLiveSync() {
 }
 
 async function generateCollectionMeta() {
-  const name = collectionModelName.value.trim();
-  if (!name) {
-    setError("Enter a model name first");
+  const promptText = collectionPrompt.value.trim();
+  if (!promptText) {
+    setError("Enter a prompt first");
     return;
   }
 
@@ -1097,11 +1031,11 @@ async function generateCollectionMeta() {
   try {
     const res = await $fetch<{ ok: boolean; title: string; description: string }>("/api/run/generate-collection", {
       method: "POST",
-      body: { modelName: name },
+      body: { prompt: promptText },
     });
     collectionGenTitle.value = res.title;
     collectionGenDescription.value = res.description;
-    setMessage(`Collection meta generated for "${name}"`);
+    setMessage(`Collection meta generated`);
   } catch (err: unknown) {
     setError(err instanceof Error ? err.message : String(err));
   } finally {
@@ -1132,7 +1066,6 @@ async function copyCollectionMeta() {
 
 async function startAnalyze() {
   canResumeAnalyze.value = false;
-  isAnalyzeAutoTracking.value = false;
   isRunningAnalyze.value = true;
   startAnalyzeLiveSync();
 
@@ -1179,7 +1112,6 @@ async function startAnalyze() {
     }
     await loadTaskStatus();
   } finally {
-    isAnalyzeAutoTracking.value = false;
     stopAnalyzeLiveSync();
     isRunningAnalyze.value = false;
   }
@@ -1265,30 +1197,11 @@ async function refreshAll() {
 watch(
   () => configText.value,
   (value) => {
+    if (isSyncingFromData) return;
     const parsed = parseConfigData(value);
     if (parsed) {
       configData.value = parsed;
     }
-  }
-);
-
-watch(
-  () => isRunningAnalyze.value,
-  (running) => {
-    if (!running) {
-      resetRateSamples();
-      return;
-    }
-    resetRateSamples();
-    pushRateSample(analysisAttemptedProgress.value.done);
-  }
-);
-
-watch(
-  () => analysisAttemptedProgress.value.done,
-  (done) => {
-    if (!isRunningAnalyze.value) return;
-    pushRateSample(done);
   }
 );
 
@@ -1304,55 +1217,91 @@ onBeforeUnmount(() => {
 <template>
   <UApp class="studio-ui">
     <div class="studio-shell">
+      <!-- ═══════════ TOP BAR ═══════════ -->
       <header class="topbar">
         <div class="topbar-brand">
-          <UBadge color="primary" variant="subtle">Only Vitiok</UBadge>
-          <h1>Media Pipeline Studio</h1>
+          <img src="~/assets/images/logo.jpg" class="brand-logo" alt="logo">
+          <h1>Only Vitiok</h1>
+          <UBadge
+            :color="pendingActions ? 'warning' : 'success'"
+            variant="subtle"
+            size="sm"
+          >
+            {{ pendingActions ? "⏳ Running" : "✅ Ready" }}
+          </UBadge>
         </div>
 
         <div class="topbar-actions">
+          <UBadge color="neutral" variant="soft" size="sm">
+            {{ mediaFiles.length }} files
+          </UBadge>
+          <UBadge color="neutral" variant="soft" size="sm">
+            {{ configItems.length }} cards
+          </UBadge>
           <UButton
             color="neutral"
-            variant="soft"
+            variant="ghost"
+            icon="i-lucide-file-json-2"
+            size="sm"
+            @click="isConfigDrawerOpen = true"
+          />
+          <UButton
+            color="neutral"
+            variant="ghost"
+            icon="i-lucide-logs"
+            size="sm"
+            @click="isLogsDrawerOpen = true"
+          />
+          <UButton
+            color="neutral"
+            variant="ghost"
             icon="i-lucide-settings-2"
-            label="Settings"
+            size="sm"
             @click="isSettingsOpen = true"
           />
         </div>
       </header>
 
       <div class="studio-layout">
+        <!-- ═══════════ LEFT SIDEBAR ═══════════ -->
         <aside class="left-sidebar">
-          <UCard id="workflow" class="surface-card">
-            <template #header>
-              <div class="section-title">
-                <h2>Workflow</h2>
-                <UBadge :color="pendingActions ? 'warning' : 'success'" variant="soft">
-                  {{ pendingActions ? "Running" : "Ready" }}
-                </UBadge>
-              </div>
-            </template>
-
-            <div class="stack-lg">
-              <UButton
-                class="w-full"
-                size="lg"
-                :color="loginButtonColor"
-                icon="i-lucide-key-round"
-                :loading="isHandlingLogin"
-                :disabled="isHandlingLogin"
-                @click="handleLoginButton"
+          <!-- Auth -->
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span class="sidebar-section-icon">🔐</span>
+              <span class="sidebar-section-label">Auth</span>
+              <UBadge
+                :color="stateExists ? 'success' : loginSessionActive ? 'warning' : 'neutral'"
+                variant="subtle"
+                size="sm"
               >
-                {{ loginButtonText }}
-              </UButton>
+                {{ stateExists ? 'Active' : loginSessionActive ? 'Pending' : 'None' }}
+              </UBadge>
+            </div>
+            <UButton
+              class="w-full"
+              size="md"
+              :color="loginButtonColor"
+              :variant="stateExists ? 'soft' : 'solid'"
+              icon="i-lucide-key-round"
+              :loading="isHandlingLogin"
+              :disabled="isHandlingLogin"
+              @click="handleLoginButton"
+            >
+              {{ loginButtonText }}
+            </UButton>
+          </div>
 
-              <UCheckbox
-                v-model="autoUploadAfterAnalyze"
-                label="Automatically run Upload after Analyze"
-              />
+          <!-- Workflow -->
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span class="sidebar-section-icon">⚡</span>
+              <span class="sidebar-section-label">Pipeline</span>
+            </div>
 
+            <div class="sidebar-actions">
               <UButton
-                class="w-full"
+                class="w-full action-btn-primary"
                 size="lg"
                 color="primary"
                 icon="i-lucide-sparkles"
@@ -1360,378 +1309,315 @@ onBeforeUnmount(() => {
                 :disabled="isBusy || isRunningAnalyze"
                 @click="startAnalyze"
               >
-                Start analysis
+                Analyze
               </UButton>
 
-              <UButton
-                class="w-full"
-                size="lg"
-                color="neutral"
-                variant="soft"
-                icon="i-lucide-cloud-upload"
-                :loading="isRunningUpload"
-                :disabled="isBusy || isRunningUpload"
-                @click="startUpload"
-              >
-                Upload
-              </UButton>
-
-              <UButton
-                class="w-full"
-                size="lg"
-                color="neutral"
-                variant="soft"
-                icon="i-lucide-tags"
-                :loading="isRunningAddTags"
-                :disabled="isBusy || isRunningAddTags"
-                @click="startAddTags"
-              >
-                Add tags to collections
-              </UButton>
-
-              <UButton
-                class="w-full"
-                size="lg"
-                color="neutral"
-                variant="soft"
-                icon="i-lucide-file-json-2"
-                @click="isConfigDrawerOpen = true"
-              >
-                Config Editor
-              </UButton>
-
-              <UButton
-                class="w-full"
-                size="lg"
-                color="neutral"
-                variant="soft"
-                icon="i-lucide-logs"
-                @click="isLogsDrawerOpen = true"
-              >
-                Run Log
-              </UButton>
-
-              <p class="muted-text">
-                After starting login, finish sign-in in the browser and click
-                "Finish login".
-              </p>
-            </div>
-          </UCard>
-
-          <UCard class="surface-card">
-            <template #header>
-              <div class="section-title">
-                <h2>Session</h2>
+              <div class="sidebar-actions-row">
+                <UButton
+                  class="flex-1"
+                  size="md"
+                  color="neutral"
+                  variant="soft"
+                  icon="i-lucide-cloud-upload"
+                  :loading="isRunningUpload"
+                  :disabled="isBusy || isRunningUpload"
+                  @click="startUpload"
+                >
+                  Upload
+                </UButton>
+                <UButton
+                  class="flex-1"
+                  size="md"
+                  color="neutral"
+                  variant="soft"
+                  icon="i-lucide-tags"
+                  :loading="isRunningAddTags"
+                  :disabled="isBusy || isRunningAddTags"
+                  @click="startAddTags"
+                >
+                  Tags
+                </UButton>
               </div>
-            </template>
 
-            <div class="stack-md">
-              <UBadge color="neutral" variant="soft">{{ loginStatusText }}</UBadge>
-              <UBadge color="primary" variant="soft">Files in media: {{ mediaFiles.length }}</UBadge>
-              <UBadge color="neutral" variant="soft">Env keys: {{ envKeys.length }}</UBadge>
-            </div>
-          </UCard>
-          <UCard class="surface-card">
-            <template #header>
-              <div class="section-title">
-                <h2>📝 Collection Meta</h2>
-              </div>
-            </template>
+              <UCheckbox
+                v-model="autoUploadAfterAnalyze"
+                label="Auto-upload after analyze"
+                class="sidebar-checkbox"
+              />
 
-            <div class="stack-md">
-              <div>
-                <p class="field-label">Model name / nickname</p>
-                <p class="muted-text">
-                  Use the main nickname plus aliases separated by `|` so the title and description
-                  can mention them naturally for search.
-                </p>
-                <div class="create-url-row">
-                  <UInput
-                    v-model="collectionModelName"
-                    class="create-url-field"
-                    size="lg"
-                    icon="i-lucide-user"
-                    placeholder="Selti | Seltin_sweety"
-                  />
+              <div class="tag-limit-toggle">
+                <span class="tag-limit-label">Global tags</span>
+                <div class="mode-toggle">
                   <UButton
-                    color="primary"
-                    size="lg"
-                    icon="i-lucide-sparkles"
-                    :loading="isGeneratingCollection"
-                    :disabled="isGeneratingCollection || !collectionModelName.trim()"
-                    @click="generateCollectionMeta"
+                    size="xs"
+                    :variant="globalTagLimit === 15 ? 'solid' : 'ghost'"
+                    :color="globalTagLimit === 15 ? 'primary' : 'neutral'"
+                    @click="globalTagLimit = 15"
                   >
-                    Generate
+                    15
+                  </UButton>
+                  <UButton
+                    size="xs"
+                    :variant="globalTagLimit === 100 ? 'solid' : 'ghost'"
+                    :color="globalTagLimit === 100 ? 'primary' : 'neutral'"
+                    @click="globalTagLimit = 100"
+                  >
+                    100
                   </UButton>
                 </div>
               </div>
-
-              <div v-if="collectionGenTitle" class="collection-gen-result">
-                <div class="collection-gen-field">
-                  <p class="field-label">Title</p>
-                  <div class="collection-gen-text">{{ collectionGenTitle }}</div>
-                </div>
-                <div class="collection-gen-field">
-                  <p class="field-label">Description</p>
-                  <div class="collection-gen-text">{{ collectionGenDescription }}</div>
-                </div>
-                <UButton
-                  size="sm"
-                  color="neutral"
-                  variant="soft"
-                  icon="i-lucide-copy"
-                  @click="copyCollectionMeta"
-                >
-                  Copy both
-                </UButton>
-              </div>
             </div>
-          </UCard>
+          </div>
+
+          <!-- Collection Meta Generator -->
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span class="sidebar-section-icon">✍️</span>
+              <span class="sidebar-section-label">Meta Generator</span>
+            </div>
+
+            <div class="meta-gen-form">
+              <UInput
+                v-model="collectionPrompt"
+                size="md"
+                icon="i-lucide-flame"
+                placeholder="Persian Baby photo leaks Part 1"
+              />
+              <UButton
+                class="w-full"
+                color="primary"
+                variant="soft"
+                size="md"
+                icon="i-lucide-sparkles"
+                :loading="isGeneratingCollection"
+                :disabled="isGeneratingCollection || !collectionPrompt.trim()"
+                @click="generateCollectionMeta"
+              >
+                Generate title & description
+              </UButton>
+            </div>
+
+            <div v-if="collectionGenTitle" class="meta-gen-result">
+              <div class="meta-gen-field">
+                <span class="meta-gen-label">Title</span>
+                <div class="meta-gen-text">{{ collectionGenTitle }}</div>
+              </div>
+              <div class="meta-gen-field">
+                <span class="meta-gen-label">Description</span>
+                <div class="meta-gen-text">{{ collectionGenDescription }}</div>
+              </div>
+              <UButton
+                class="w-full"
+                size="sm"
+                color="neutral"
+                variant="soft"
+                icon="i-lucide-copy"
+                @click="copyCollectionMeta"
+              >
+                Copy both
+              </UButton>
+            </div>
+          </div>
         </aside>
 
+        <!-- ═══════════ MAIN CONTENT ═══════════ -->
         <main class="center-content">
-          <UAlert
-            v-if="infoMessage"
-            color="success"
-            variant="subtle"
-            icon="i-lucide-check-circle-2"
-            :title="infoMessage"
-          />
+          <!-- Alerts -->
+          <Transition name="fade">
+            <UAlert
+              v-if="infoMessage"
+              color="success"
+              variant="subtle"
+              icon="i-lucide-check-circle-2"
+              :title="infoMessage"
+              class="alert-toast"
+            />
+          </Transition>
 
-          <UAlert
-            v-if="errorMessage"
-            color="error"
-            variant="subtle"
-            icon="i-lucide-circle-alert"
-            :title="errorMessage"
-          />
+          <Transition name="fade">
+            <UAlert
+              v-if="errorMessage"
+              color="error"
+              variant="subtle"
+              icon="i-lucide-circle-alert"
+              :title="errorMessage"
+              class="alert-toast"
+            />
+          </Transition>
 
-          <UCard id="media" class="surface-card media-card">
-            <template #header>
-              <div class="section-title">
-                <h2>Media Dropzone</h2>
-                <div class="media-header-actions">
-                  <UBadge color="neutral" variant="soft">{{ configItems.length }} cards</UBadge>
+          <!-- ═══════════ UPLOAD COLLECTIONS ═══════════ -->
+          <div class="panel collections-panel">
+            <div class="panel-header">
+              <div class="panel-header-left">
+                <h2 class="panel-title">📦 Collections</h2>
+                <UBadge v-if="isSavingCreateUrl" color="primary" variant="soft" size="sm">
+                  saving...
+                </UBadge>
+              </div>
+              <div class="panel-header-right">
+                <div class="mode-toggle">
                   <UButton
-                    color="primary"
-                    variant="soft"
-                    size="sm"
-                    icon="i-lucide-scan-search"
-                    :loading="isScanningMedia"
-                    :disabled="isBusy || isScanningMedia || isClearingGeneratedConfig"
-                    @click="scanMedia"
+                    :color="uploadDistributionMode === 'range' ? 'primary' : 'neutral'"
+                    :variant="uploadDistributionMode === 'range' ? 'solid' : 'ghost'"
+                    size="xs"
+                    @click="uploadDistributionMode = 'range'; debouncedSaveCollections()"
                   >
-                    Scan media
+                    Range
                   </UButton>
                   <UButton
-                    color="warning"
-                    variant="soft"
-                    size="sm"
-                    icon="i-lucide-eraser"
-                    :loading="isClearingGeneratedConfig"
-                    :disabled="isBusy || isClearingMedia || isClearingGeneratedConfig"
-                    @click="clearGeneratedConfig"
+                    :color="uploadDistributionMode === 'even' ? 'primary' : 'neutral'"
+                    :variant="uploadDistributionMode === 'even' ? 'solid' : 'ghost'"
+                    size="xs"
+                    @click="uploadDistributionMode = 'even'; debouncedSaveCollections()"
                   >
-                    Clear generated config
-                  </UButton>
-                  <UButton
-                    color="error"
-                    variant="soft"
-                    size="sm"
-                    icon="i-lucide-trash-2"
-                    :loading="isClearingMedia"
-                    :disabled="isBusy || isClearingMedia || isClearingGeneratedConfig"
-                    @click="clearAllMedia"
-                  >
-                    Clear all media
+                    Even
                   </UButton>
                 </div>
-              </div>
-            </template>
-
-            <div class="create-url-input">
-              <div class="upload-collections-head">
-                <div>
-                  <p class="field-label">Upload collections</p>
-                  <p class="muted-text">
-                    Set 1-based manual ranges like 1-50 / 51-100, or switch to even split to
-                    distribute the whole config uniformly across collections.
-                  </p>
-                </div>
-
-                <div class="upload-collections-badges">
-                  <UBadge color="neutral" variant="soft">
-                    {{ normalizedUploadCollections.length }} collection(s)
-                  </UBadge>
-                  <UBadge color="primary" variant="soft">
-                    Mode: {{ uploadDistributionMode === "even" ? "Even split" : "Range" }}
-                  </UBadge>
-                </div>
-              </div>
-
-              <div class="distribution-mode-row">
-                <UButton
-                  :color="uploadDistributionMode === 'range' ? 'primary' : 'neutral'"
-                  :variant="uploadDistributionMode === 'range' ? 'solid' : 'soft'"
-                  size="lg"
-                  icon="i-lucide-scan-line"
-                  @click="uploadDistributionMode = 'range'"
-                >
-                  Use ranges
-                </UButton>
-                <UButton
-                  :color="uploadDistributionMode === 'even' ? 'primary' : 'neutral'"
-                  :variant="uploadDistributionMode === 'even' ? 'solid' : 'soft'"
-                  size="lg"
-                  icon="i-lucide-split"
-                  @click="uploadDistributionMode = 'even'"
-                >
-                  Even split
-                </UButton>
-              </div>
-
-              <div class="upload-collections-list">
-                <div
-                  v-for="(target, index) in uploadCollections"
-                  :key="`upload-target-${index}`"
-                  class="upload-collection-row"
-                >
-                  <UInput
-                    v-model="target.collectionId"
-                    class="upload-collection-id"
-                    size="lg"
-                    icon="i-lucide-folders"
-                    placeholder="Collection ID"
-                  />
-                  <UInput
-                    v-model="target.createUrl"
-                    class="upload-collection-url"
-                    size="lg"
-                    icon="i-lucide-link-2"
-                    placeholder="https://collections.only-nice.com/collection/..."
-                  />
-                  <UInput
-                    :model-value="target.rangeStart == null ? '' : String(target.rangeStart)"
-                    class="upload-collection-count"
-                    type="number"
-                    size="lg"
-                    min="1"
-                    :disabled="uploadDistributionMode === 'even'"
-                    placeholder="Start"
-                    @update:model-value="updateUploadCollectionRangePoint(index, 'rangeStart', $event)"
-                  />
-                  <UInput
-                    :model-value="target.rangeEnd == null ? '' : String(target.rangeEnd)"
-                    class="upload-collection-count"
-                    type="number"
-                    size="lg"
-                    min="1"
-                    :disabled="uploadDistributionMode === 'even'"
-                    placeholder="End"
-                    @update:model-value="updateUploadCollectionRangePoint(index, 'rangeEnd', $event)"
-                  />
-                  <UButton
-                    color="neutral"
-                    variant="soft"
-                    size="lg"
-                    icon="i-lucide-link"
-                    @click="syncUploadCollectionUrl(index)"
-                  >
-                    Sync URL
-                  </UButton>
-                  <UButton
-                    color="error"
-                    variant="soft"
-                    size="lg"
-                    icon="i-lucide-trash-2"
-                    @click="removeUploadCollection(index)"
-                  >
-                    Remove
-                  </UButton>
-                </div>
-              </div>
-
-              <div class="upload-collections-actions">
                 <UButton
                   color="neutral"
                   variant="soft"
-                  size="lg"
+                  size="sm"
                   icon="i-lucide-plus"
                   @click="addUploadCollection"
                 >
-                  Add collection
+                  Add
                 </UButton>
-                <UButton
-                  color="neutral"
-                  variant="soft"
-                  size="lg"
-                  icon="i-lucide-link"
-                  @click="syncAllUploadCollectionUrls"
-                >
-                  Sync all from BASE_URL
-                </UButton>
-                <UButton
-                  color="primary"
-                  size="lg"
-                  :loading="isSavingCreateUrl"
-                  @click="saveUploadCollections"
-                >
-                  Save collections
-                </UButton>
-              </div>
-
-              <div v-if="plannedUploadBreakdown.targets.length" class="upload-plan-panel">
-                <div class="global-tags-head">
-                  <p class="field-label">Upload split preview</p>
-                  <UBadge color="neutral" variant="soft">
-                    {{ plannedUploadBreakdown.assignedCount }} / {{ configItems.length }} assigned
-                  </UBadge>
-                </div>
-
-                <div class="upload-plan-list">
-                  <div
-                    v-for="(target, index) in plannedUploadBreakdown.targets"
-                    :key="`upload-plan-${index}`"
-                    class="upload-plan-item"
-                  >
-                    <div>
-                      <p class="upload-plan-title">{{ target.label }}</p>
-                      <p class="muted-text">{{ target.createUrl }}</p>
-                    </div>
-                    <UBadge color="primary" variant="soft">
-                      {{ target.rangeText }} • {{ target.assignedCount }} asset(s)
-                    </UBadge>
-                  </div>
-                </div>
-
-                <p v-if="plannedUploadBreakdown.unassignedCount" class="muted-text">
-                  {{ plannedUploadBreakdown.unassignedCount }} asset(s) are still outside the
-                  current upload plan.
-                </p>
               </div>
             </div>
 
-            <div class="global-tags-panel">
-              <div class="global-tags-head">
-                <p class="field-label">Global tags array</p>
-                <UBadge color="neutral" variant="soft">{{ globalTags.length }} tags</UBadge>
-              </div>
+            <div v-if="!uploadCollections.length" class="empty-state-mini">
+              No collections — click <strong>Add</strong> to start
+            </div>
 
-              <div class="tag-list">
-                <UBadge
-                  v-for="tag in globalTags"
-                  :key="`global-${tag}`"
-                  class="tag-badge"
-                  color="primary"
-                  variant="soft"
-                >
-                  #{{ tag }}
+            <div v-else class="collections-grid">
+              <div
+                v-for="(target, index) in uploadCollections"
+                :key="`upload-target-${index}`"
+                class="col-card"
+                :class="{ 'col-card-has-plan': plannedUploadBreakdown.targets[index] }"
+              >
+                <!-- Card header -->
+                <div class="col-card-head">
+                  <span class="col-card-num">{{ index + 1 }}</span>
+                  <UButton
+                    color="error"
+                    variant="ghost"
+                    size="xs"
+                    icon="i-lucide-trash-2"
+                    square
+                    @click="removeUploadCollection(index)"
+                  />
+                </div>
+
+                <!-- URL input -->
+                <UInput
+                  :model-value="target.createUrl"
+                  size="lg"
+                  icon="i-lucide-link-2"
+                  placeholder="Paste collection URL..."
+                  @update:model-value="handleCollectionUrlInput(index, String($event))"
+                />
+
+                <!-- Extracted collection ID -->
+                <div v-if="target.collectionId" class="col-card-id">
+                  <span class="col-card-id-label">ID</span>
+                  <span class="col-card-id-value">{{ target.collectionId }}</span>
+                </div>
+
+                <!-- Range inputs (only in range mode) -->
+                <div v-if="uploadDistributionMode === 'range'" class="col-card-range">
+                  <div class="col-card-range-field">
+                    <label class="col-card-range-label">From</label>
+                    <UInput
+                      :model-value="target.rangeStart == null ? '' : String(target.rangeStart)"
+                      type="number"
+                      size="md"
+                      min="1"
+                      placeholder="1"
+                      @update:model-value="updateUploadCollectionRangePoint(index, 'rangeStart', $event)"
+                    />
+                  </div>
+                  <div class="col-card-range-field">
+                    <label class="col-card-range-label">To</label>
+                    <UInput
+                      :model-value="target.rangeEnd == null ? '' : String(target.rangeEnd)"
+                      type="number"
+                      size="md"
+                      min="1"
+                      placeholder="∞"
+                      @update:model-value="updateUploadCollectionRangePoint(index, 'rangeEnd', $event)"
+                    />
+                  </div>
+                </div>
+
+                <!-- Inline distribution info -->
+                <div v-if="plannedUploadBreakdown.targets[index]" class="col-card-plan">
+                  <span class="col-card-plan-range">
+                    {{ plannedUploadBreakdown.targets[index].rangeText }}
+                  </span>
+                  <span class="col-card-plan-count">
+                    {{ plannedUploadBreakdown.targets[index].assignedCount }} items
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Total assigned summary -->
+            <div v-if="plannedUploadBreakdown.targets.length" class="col-total-bar">
+              <span class="col-total-label">Total assigned</span>
+              <span class="col-total-value">
+                {{ plannedUploadBreakdown.assignedCount }} / {{ configItems.length }}
+              </span>
+              <span v-if="plannedUploadBreakdown.unassignedCount" class="col-total-unassigned">
+                ({{ plannedUploadBreakdown.unassignedCount }} unassigned)
+              </span>
+            </div>
+          </div>
+
+          <!-- ═══════════ DROPZONE ═══════════ -->
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-header-left">
+                <h2 class="panel-title">📁 Media</h2>
+                <UBadge color="neutral" variant="soft" size="sm">
+                  {{ mediaFiles.length }} files
                 </UBadge>
               </div>
-
-              <p v-if="!globalTags.length" class="muted-text">
-                No global tags in config yet.
-              </p>
+              <div class="panel-header-right">
+                <UButton
+                  color="primary"
+                  variant="soft"
+                  size="xs"
+                  icon="i-lucide-scan-search"
+                  :loading="isScanningMedia"
+                  :disabled="isBusy || isScanningMedia || isClearingGeneratedConfig"
+                  @click="scanMedia"
+                >
+                  Scan
+                </UButton>
+                <UButton
+                  color="warning"
+                  variant="soft"
+                  size="xs"
+                  icon="i-lucide-eraser"
+                  :loading="isClearingGeneratedConfig"
+                  :disabled="isBusy || isClearingMedia || isClearingGeneratedConfig"
+                  @click="clearGeneratedConfig"
+                >
+                  Clear config
+                </UButton>
+                <UButton
+                  color="error"
+                  variant="soft"
+                  size="xs"
+                  icon="i-lucide-trash-2"
+                  :loading="isClearingMedia"
+                  :disabled="isBusy || isClearingMedia || isClearingGeneratedConfig"
+                  @click="clearAllMedia"
+                >
+                  Clear all
+                </UButton>
+              </div>
             </div>
 
             <div
@@ -1741,23 +1627,20 @@ onBeforeUnmount(() => {
               @dragover="onDragOver"
               @dragleave="onDragLeave"
             >
-              <div class="dropzone-head">
-                <UBadge color="primary" variant="subtle">Drag & Drop</UBadge>
-              </div>
-
-              <div class="file-picker-row">
+              <div class="dropzone-content">
+                <UIcon name="i-lucide-upload-cloud" class="dropzone-icon" />
+                <p class="dropzone-text">Drop files here or click to upload</p>
                 <UButton
-                  size="lg"
+                  size="sm"
                   color="primary"
+                  variant="soft"
                   icon="i-lucide-upload"
                   :loading="isUploadingMedia"
                   @click="openFileDialog"
                 >
                   Select files
                 </UButton>
-                <span class="muted-text">{{ pickedFileText }}</span>
               </div>
-
               <input
                 ref="fileInputRef"
                 class="hidden-file-input"
@@ -1767,187 +1650,280 @@ onBeforeUnmount(() => {
               >
             </div>
 
-            <div v-if="isRunningAnalyze || canResumeAnalyze" class="analysis-progress">
-              <div class="analysis-progress-head">
-                <div class="analysis-progress-meta">
-                  <span class="analysis-progress-title">
-                    {{ isRunningAnalyze ? "Analysis in progress" : "Analysis stopped" }}
-                  </span>
-                  <span class="muted-text">
-                    {{ analysisAttemptedProgress.done }} / {{ analysisAttemptedProgress.total }} attempted
-                    ({{ analysisAttemptedProgress.percent }}%)
-                  </span>
-                  <span class="muted-text">
-                    {{ analysisProgress.done }} / {{ analysisProgress.total }} analyzed
-                  </span>
-                  <span v-if="isRunningAnalyze" class="muted-text">
-                    {{ analysisRateText }} | {{ analysisEtaText }}
-                  </span>
-                </div>
-
-                <UButton
-                  v-if="isRunningAnalyze"
-                  color="error"
-                  variant="soft"
-                  icon="i-lucide-square"
-                  :loading="isStoppingAnalyze"
-                  :disabled="isStoppingAnalyze"
-                  @click="stopAnalyze"
-                >
-                  Stop analysis
-                </UButton>
-
-                <UButton
-                  v-else
+            <!-- Global tags -->
+            <div v-if="globalTags.length" class="global-tags">
+              <div class="global-tags-head">
+                <span class="panel-subtitle">Global tags</span>
+                <UBadge color="neutral" variant="soft" size="sm">{{ globalTags.length }}</UBadge>
+              </div>
+              <div class="tag-list">
+                <UBadge
+                  v-for="tag in globalTags"
+                  :key="`global-${tag}`"
+                  class="tag-badge"
                   color="primary"
                   variant="soft"
-                  icon="i-lucide-play"
-                  :disabled="isBusy || isRunningAnalyze"
-                  @click="resumeAnalyze"
+                  size="sm"
                 >
-                  Resume analysis
+                  #{{ tag }}
+                </UBadge>
+              </div>
+            </div>
+          </div>
+
+          <!-- ═══════════ ANALYSIS PROGRESS ═══════════ -->
+          <div v-if="isRunningAnalyze || canResumeAnalyze" class="panel analysis-panel">
+            <div class="analysis-bar">
+              <div class="analysis-info">
+                <span class="analysis-status">
+                  {{ isRunningAnalyze ? "⏳ Analyzing..." : "⏸️ Paused" }}
+                </span>
+                <span class="muted-text small-text">
+                  {{ analysisProgress.done }}/{{ analysisProgress.total }}
+                  ({{ analysisProgress.percent }}%)
+                </span>
+              </div>
+              <UButton
+                v-if="isRunningAnalyze"
+                color="error"
+                variant="soft"
+                size="xs"
+                icon="i-lucide-square"
+                :loading="isStoppingAnalyze"
+                :disabled="isStoppingAnalyze"
+                @click="stopAnalyze"
+              >
+                Stop
+              </UButton>
+              <UButton
+                v-else
+                color="primary"
+                variant="soft"
+                size="xs"
+                icon="i-lucide-play"
+                :disabled="isBusy || isRunningAnalyze"
+                @click="resumeAnalyze"
+              >
+                Resume
+              </UButton>
+            </div>
+            <UProgress :model-value="analysisProgress.percent" size="sm" />
+          </div>
+
+          <!-- ═══════════ MEDIA CARDS GRID ═══════════ -->
+          <div v-if="configItems.length" class="media-pagination-bar">
+            <span class="muted-text small-text">
+              {{ configItems.length }} items total — page {{ mediaPage }}/{{ mediaTotalPages }}
+            </span>
+            <div class="media-pagination-btns">
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-chevrons-left"
+                :disabled="mediaPage <= 1"
+                @click="mediaPage = 1"
+              />
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-chevron-left"
+                :disabled="mediaPage <= 1"
+                @click="mediaPage = Math.max(1, mediaPage - 1)"
+              />
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-chevron-right"
+                :disabled="mediaPage >= mediaTotalPages"
+                @click="mediaPage = Math.min(mediaTotalPages, mediaPage + 1)"
+              />
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-chevrons-right"
+                :disabled="mediaPage >= mediaTotalPages"
+                @click="mediaPage = mediaTotalPages"
+              />
+            </div>
+          </div>
+
+          <div class="media-cards">
+            <div
+              v-for="(item, pIndex) in paginatedItems"
+              :key="item.filePath || item.fileName || pIndex"
+              class="media-card-item"
+              :class="{ 'is-vip': item.vip }"
+            >
+              <!-- Preview -->
+              <div class="media-preview">
+                <UButton
+                  class="delete-card-btn"
+                  color="error"
+                  variant="solid"
+                  size="xs"
+                  square
+                  @click.stop="removeCard((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex)"
+                >
+                  <UIcon name="i-lucide-x" class="size-3" />
                 </UButton>
+
+                <img
+                  v-if="isImageItem(item)"
+                  :src="getAssetUrl(item)"
+                  alt=""
+                  loading="lazy"
+                >
+                <video
+                  v-else-if="isVideoItem(item)"
+                  :src="getAssetUrl(item)"
+                  :poster="getPosterUrl(item)"
+                  preload="metadata"
+                  muted
+                  playsinline
+                />
+                <div v-else class="media-preview-fallback">?</div>
+
+                <div v-if="isVideoItem(item)" class="media-type-badge">
+                  <UIcon name="i-lucide-video" class="size-3" />
+                </div>
               </div>
 
-              <UProgress :model-value="analysisAttemptedProgress.percent" />
-            </div>
+              <!-- Card body -->
+              <div class="media-card-body">
+                <!-- VIP + index row -->
+                <div class="card-top-row">
+                  <span class="card-index">#{{ (mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex + 1 }}</span>
+                  <button
+                    class="vip-toggle"
+                    :class="{ active: item.vip }"
+                    @click="updateCardField((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex, 'vip', !item.vip)"
+                  >
+                    {{ item.vip ? '★ VIP' : '☆ VIP' }}
+                  </button>
+                </div>
 
-            <div class="media-cards">
-              <UCard
-                v-for="(item, index) in configItems"
-                :key="item.filePath || item.fileName || index"
-                class="media-card-item"
-              >
-                <template #header>
-                  <div class="media-card-head">
-                    <div class="media-preview">
-                      <div class="vip-overlay">
-                        <UCheckbox
-                          :model-value="Boolean(item.vip)"
-                          label="VIP"
-                          @update:model-value="updateCardField(index, 'vip', $event)"
-                        />
-                      </div>
+                <UInput
+                  :model-value="item.title || ''"
+                  size="sm"
+                  placeholder="Title"
+                  :maxlength="60"
+                  @update:model-value="updateCardField((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex, 'title', String($event).slice(0, 60))"
+                />
+                <UTextarea
+                  :model-value="item.description || ''"
+                  :rows="2"
+                  autoresize
+                  size="sm"
+                  placeholder="Description"
+                  @update:model-value="updateCardField((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex, 'description', $event)"
+                />
 
-                      <div class="card-top-actions">
-                        <UButton
-                          class="delete-card-btn"
-                          color="error"
-                          variant="solid"
-                          size="xs"
-                          square
-                          aria-label="Delete card"
-                          @click.stop="removeCard(index)"
-                        >
-                          <UIcon name="i-lucide-trash-2" class="size-4" />
-                        </UButton>
-                      </div>
-
-                      <img
-                        v-if="isImageItem(item)"
-                        :src="getAssetUrl(item)"
-                        alt="Media preview"
-                        loading="lazy"
-                      >
-                      <video
-                        v-else-if="isVideoItem(item)"
-                        :src="getAssetUrl(item)"
-                        :poster="getPosterUrl(item)"
-                        preload="metadata"
-                        muted
-                        playsinline
-                      />
-                      <div v-else class="media-preview-fallback">No preview</div>
-                    </div>
-                  </div>
-                </template>
-
-                <div class="media-card-body">
+                <!-- Tags -->
+                <div class="tag-list">
+                  <UBadge
+                    v-for="tag in getTagsArray(item)"
+                    :key="`${pIndex}-${tag}`"
+                    class="tag-badge"
+                    color="primary"
+                    variant="soft"
+                    size="sm"
+                    @click="removeTagFromCard((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex, tag)"
+                  >
+                    #{{ tag }}
+                  </UBadge>
+                </div>
+                <div class="tag-input-row">
                   <UInput
-                    :model-value="item.title || ''"
-                    placeholder="Title"
-                    @update:model-value="updateCardField(index, 'title', $event)"
+                    v-model="tagDraftByIndex[(mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex]"
+                    size="sm"
+                    placeholder="+ tag"
+                    @keyup.enter="addTagToCard((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex)"
                   />
-                  <UTextarea
-                    :model-value="item.description || ''"
-                    :rows="4"
-                    autoresize
-                    placeholder="Description"
-                    @update:model-value="updateCardField(index, 'description', $event)"
+                  <UButton
+                    color="neutral"
+                    variant="ghost"
+                    size="xs"
+                    icon="i-lucide-plus"
+                    square
+                    @click="addTagToCard((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex)"
                   />
-                  <div class="tag-list">
+                </div>
+
+                <!-- AI Vision -->
+                <div v-if="item.contentSummary" class="ai-vision">
+                  <span class="ai-vision-icon">👁️</span>
+                  <span class="ai-vision-text">{{ item.contentSummary }}</span>
+                </div>
+
+                <!-- Trends -->
+                <div v-if="item.trendTermsUsed?.length || item.trendScore" class="trend-section">
+                  <div class="trend-header">
+                    <span class="trend-label">📈</span>
                     <UBadge
-                      v-for="tag in getTagsArray(item)"
-                      :key="`${index}-${tag}`"
-                      class="tag-badge"
-                      color="primary"
-                      variant="soft"
-                      @click="removeTagFromCard(index, tag)"
-                    >
-                      #{{ tag }}
-                    </UBadge>
-                  </div>
-                  <div class="tag-input-row">
-                    <UInput
-                      v-model="tagDraftByIndex[index]"
-                      placeholder="New tag"
-                      @keyup.enter="addTagToCard(index)"
-                    />
-                    <UButton
-                      color="neutral"
+                      v-if="item.trendScore"
+                      :color="item.trendScore >= 60 ? 'success' : item.trendScore >= 30 ? 'warning' : 'neutral'"
                       variant="soft"
                       size="sm"
-                      @click="addTagToCard(index)"
                     >
-                      Add
-                    </UButton>
+                      {{ item.trendScore }}/100
+                    </UBadge>
                   </div>
-
-                  <div v-if="item.contentSummary" class="content-summary">
-                    <span class="summary-label">👁️ AI Vision:</span>
-                    <span class="summary-text">{{ item.contentSummary }}</span>
-                  </div>
-
-                  <div v-if="item.trendTermsUsed?.length || item.trendScore" class="trend-section">
-                    <div class="trend-header">
-                      <span class="trend-label">📈 SEO Trends</span>
-                      <UBadge
-                        v-if="item.trendScore"
-                        :color="item.trendScore >= 60 ? 'success' : item.trendScore >= 30 ? 'warning' : 'neutral'"
-                        variant="soft"
-                        size="sm"
-                      >
-                        Score: {{ item.trendScore }}/100
-                      </UBadge>
-                    </div>
-                    <div v-if="item.trendTermsUsed?.length" class="trend-terms">
-                      <UBadge
-                        v-for="term in item.trendTermsUsed"
-                        :key="`trend-${index}-${term}`"
-                        color="success"
-                        variant="subtle"
-                        size="sm"
-                      >
-                        🔥 {{ term }}
-                      </UBadge>
-                    </div>
-                    <p v-else class="trend-none">No trending terms matched this content</p>
+                  <div v-if="item.trendTermsUsed?.length" class="trend-terms">
+                    <UBadge
+                      v-for="term in item.trendTermsUsed"
+                      :key="`trend-${pIndex}-${term}`"
+                      color="success"
+                      variant="subtle"
+                      size="sm"
+                    >
+                      {{ term }}
+                    </UBadge>
                   </div>
                 </div>
-              </UCard>
-              <p v-if="!configItems.length" class="muted-text">
-                No items in config yet. Start analysis or edit the config.
-              </p>
+              </div>
             </div>
-          </UCard>
 
+            <div v-if="!configItems.length" class="empty-state">
+              <UIcon name="i-lucide-image-off" class="empty-icon" />
+              <p>No items yet. Drop files and run analysis.</p>
+            </div>
+          </div>
+
+          <div v-if="configItems.length > MEDIA_PAGE_SIZE" class="media-pagination-bar bottom">
+            <span class="muted-text small-text">
+              Page {{ mediaPage }} of {{ mediaTotalPages }}
+            </span>
+            <div class="media-pagination-btns">
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-chevron-left"
+                :disabled="mediaPage <= 1"
+                @click="mediaPage = Math.max(1, mediaPage - 1)"
+              />
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-chevron-right"
+                :disabled="mediaPage >= mediaTotalPages"
+                @click="mediaPage = Math.min(mediaTotalPages, mediaPage + 1)"
+              />
+            </div>
+          </div>
         </main>
       </div>
     </div>
 
+    <!-- ═══════════ SETTINGS DRAWER ═══════════ -->
     <UDrawer
       v-model:open="isSettingsOpen"
-      title="Settings (.env)"
+      title="⚙️ Settings"
       :ui="{ content: '!max-w-none !w-screen !h-screen !rounded-none' }"
     >
       <template #body>
@@ -1964,28 +1940,27 @@ onBeforeUnmount(() => {
                 :model-value="normalizedUploadCollections[0]?.collectionId || ''"
                 size="lg"
                 readonly
-                placeholder="Add collections in the main Upload collections panel"
+                placeholder="Synced from upload collections"
               />
             </div>
 
             <div class="field-block field-action">
-              <p class="muted-text">
-                CREATE_URL and COLLECTION_ID are synced automatically from the first upload
-                collection when you save.
+              <p class="muted-text small-text">
+                CREATE_URL and COLLECTION_ID sync from the first upload collection on save.
               </p>
             </div>
           </div>
 
           <div class="env-list">
             <div v-for="key in envKeys" :key="key" class="env-item">
-              <UBadge color="neutral" variant="outline">{{ key }}</UBadge>
+              <UBadge color="neutral" variant="outline" size="sm">{{ key }}</UBadge>
               <div class="env-input-row">
                 <UInput v-model="envMap[key]" size="lg" />
                 <UButton
                   color="error"
                   variant="ghost"
                   icon="i-lucide-trash-2"
-                  aria-label="Delete env key"
+                  aria-label="Delete"
                   @click="removeEnvField(key)"
                 />
               </div>
@@ -1997,12 +1972,10 @@ onBeforeUnmount(() => {
               <p class="field-label">NEW KEY</p>
               <UInput v-model="newEnvKey" size="lg" placeholder="NEW_ENV_KEY" />
             </div>
-
             <div class="field-block">
               <p class="field-label">VALUE</p>
               <UInput v-model="newEnvValue" size="lg" placeholder="value" />
             </div>
-
             <div class="field-block field-action">
               <UButton
                 class="w-full"
@@ -2018,7 +1991,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </template>
-
       <template #footer>
         <div class="drawer-footer">
           <UButton
@@ -2035,14 +2007,15 @@ onBeforeUnmount(() => {
       </template>
     </UDrawer>
 
+    <!-- ═══════════ CONFIG DRAWER ═══════════ -->
     <UDrawer
       v-model:open="isConfigDrawerOpen"
-      title="Config Editor"
+      title="📄 Config Editor"
       :ui="{ content: '!max-w-none !w-screen !h-screen !rounded-none' }"
     >
       <template #body>
         <div class="drawer-body">
-          <UBadge color="neutral" variant="soft">{{ configPath || "no file" }}</UBadge>
+          <UBadge color="neutral" variant="soft" size="sm">{{ configPath || "no file" }}</UBadge>
           <UTextarea
             v-model="configText"
             class="drawer-textarea"
@@ -2054,38 +2027,25 @@ onBeforeUnmount(() => {
       </template>
       <template #footer>
         <div class="drawer-actions">
-          <UButton
-            class="w-full"
-            size="lg"
-            color="neutral"
-            variant="soft"
-            icon="i-lucide-refresh-ccw"
-            @click="loadConfig"
-          >
+          <UButton class="w-full" size="lg" color="neutral" variant="soft" icon="i-lucide-refresh-ccw" @click="loadConfig">
             Refresh
           </UButton>
-          <UButton
-            class="w-full"
-            size="lg"
-            color="primary"
-            icon="i-lucide-file-check-2"
-            :loading="isSavingConfig"
-            @click="saveConfig"
-          >
+          <UButton class="w-full" size="lg" color="primary" icon="i-lucide-file-check-2" :loading="isSavingConfig" @click="saveConfig">
             Save config
           </UButton>
         </div>
       </template>
     </UDrawer>
 
+    <!-- ═══════════ LOGS DRAWER ═══════════ -->
     <UDrawer
       v-model:open="isLogsDrawerOpen"
-      title="Run Log"
+      title="📋 Run Log"
       :ui="{ content: '!max-w-none !w-screen !h-screen !rounded-none' }"
     >
       <template #body>
         <div class="drawer-body">
-          <UBadge color="primary" variant="soft">Live</UBadge>
+          <UBadge color="primary" variant="soft" size="sm">Live</UBadge>
           <UTextarea
             class="drawer-textarea"
             readonly
@@ -2097,15 +2057,8 @@ onBeforeUnmount(() => {
       </template>
       <template #footer>
         <div class="drawer-actions">
-          <UButton
-            class="w-full"
-            size="lg"
-            color="neutral"
-            variant="soft"
-            icon="i-lucide-refresh-ccw"
-            @click="loadTaskStatus"
-          >
-            Refresh status
+          <UButton class="w-full" size="lg" color="neutral" variant="soft" icon="i-lucide-refresh-ccw" @click="loadTaskStatus">
+            Refresh
           </UButton>
         </div>
       </template>
@@ -2114,383 +2067,524 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* ═══════════ GLOBALS ═══════════ */
 .studio-ui {
   min-height: 100vh;
-  color: #e2e8f0;
+  color: var(--text-primary);
+  background: var(--bg-body);
 }
 
 .studio-shell {
-  max-width: 1760px;
+  max-width: 1800px;
   margin: 0 auto;
-  padding: 16px;
+  padding: 10px 14px;
   display: grid;
-  gap: 16px;
+  gap: 10px;
 }
 
+/* ═══════════ TOP BAR ═══════════ */
 .topbar {
-  border: 1px solid rgba(71, 85, 105, 0.5);
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.8));
-  padding: 14px 16px;
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.85));
+  backdrop-filter: blur(16px);
+  padding: 10px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
 }
 
 .topbar-brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-width: 0;
+  gap: 10px;
+}
+
+.brand-icon {
+  font-size: 1.4rem;
+}
+
+.brand-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(56, 189, 248, 0.4);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.2);
+  flex-shrink: 0;
 }
 
 .topbar-brand h1 {
   margin: 0;
-  font-size: clamp(1.2rem, 2.1vw, 1.7rem);
-  line-height: 1.1;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #38bdf8, #7dd3fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  gap: 6px;
 }
 
+/* ═══════════ LAYOUT ═══════════ */
 .studio-layout {
   display: grid;
-  gap: 16px;
-  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 10px;
+  grid-template-columns: 270px minmax(0, 1fr);
 }
 
-.left-sidebar,
-.center-content {
+/* ═══════════ SIDEBAR ═══════════ */
+.left-sidebar {
   display: grid;
   align-content: start;
-  gap: 16px;
-}
-
-.surface-card {
-  border: 1px solid rgba(71, 85, 105, 0.5);
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(15, 23, 42, 0.82));
-}
-
-.section-title {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
-
-.section-title h2 {
-  margin: 0;
-  font-size: 1.03rem;
-  line-height: 1.2;
-}
-
-.section-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.media-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.stack-lg {
-  display: grid;
-  gap: 14px;
-}
-
-.stack-md {
-  display: grid;
-  gap: 10px;
-}
-
-.media-card {
-  scroll-margin-top: 24px;
-}
-
-.create-url-input {
-  border: 1px solid rgba(71, 85, 105, 0.45);
-  border-radius: 14px;
-  background:
-    radial-gradient(circle at 10% 0%, rgba(34, 211, 238, 0.12), transparent 40%),
-    rgba(2, 6, 23, 0.45);
-  padding: 16px;
-  display: grid;
-  gap: 12px;
-  box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.08);
-}
-
-.create-url-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.create-url-field {
-  flex: 1 1 360px;
-  min-width: 0;
-}
-
-.upload-collections-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.upload-collections-badges {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.distribution-mode-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.upload-collections-list {
-  display: grid;
-  gap: 10px;
-}
-
-.upload-collection-row {
-  display: grid;
-  gap: 10px;
-  grid-template-columns:
-    minmax(180px, 0.8fr)
-    minmax(280px, 1.5fr)
-    120px
-    120px
-    auto
-    auto;
-  align-items: center;
-}
-
-.upload-collection-id,
-.upload-collection-url,
-.upload-collection-count {
-  min-width: 0;
-}
-
-.upload-collections-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.upload-plan-panel {
-  border: 1px solid rgba(71, 85, 105, 0.45);
+  gap: 0;
+  position: sticky;
+  top: 68px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  border: 1px solid var(--border-default);
   border-radius: 12px;
-  background: rgba(2, 6, 23, 0.38);
-  padding: 12px;
-  display: grid;
-  gap: 10px;
+  background: linear-gradient(180deg, var(--bg-surface), rgba(11, 17, 32, 0.95));
+  backdrop-filter: blur(12px);
 }
 
-.upload-plan-list {
+.sidebar-section {
+  padding: 14px;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.sidebar-section:last-child {
+  border-bottom: none;
+}
+
+.sidebar-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.sidebar-section-icon {
+  font-size: 1rem;
+}
+
+.sidebar-section-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.sidebar-actions {
   display: grid;
   gap: 8px;
 }
 
-.upload-plan-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(15, 23, 42, 0.48);
-  border: 1px solid rgba(71, 85, 105, 0.35);
+.sidebar-actions-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
 }
 
-.upload-plan-title {
-  margin: 0 0 4px;
-  font-size: 0.94rem;
+.sidebar-checkbox {
+  padding: 2px 0;
+}
+
+.tag-limit-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.tag-limit-label {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.action-btn-primary {
+  font-weight: 700;
+}
+
+/* ═══════════ META GENERATOR ═══════════ */
+.meta-gen-form {
+  display: grid;
+  gap: 8px;
+}
+
+.meta-gen-result {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.meta-gen-field {
+  display: grid;
+  gap: 3px;
+}
+
+.meta-gen-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
   font-weight: 600;
 }
 
-.global-tags-panel {
-  margin-top: 12px;
-  border: 1px solid rgba(71, 85, 105, 0.45);
-  border-radius: 14px;
-  background: rgba(2, 6, 23, 0.38);
-  padding: 12px;
+.meta-gen-text {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-body);
+  border: 1px solid var(--border-default);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  user-select: all;
+  word-break: break-word;
+  color: var(--text-primary);
+}
+
+/* ═══════════ CENTER CONTENT ═══════════ */
+.center-content {
   display: grid;
+  align-content: start;
   gap: 10px;
 }
 
-.global-tags-head {
+/* ═══════════ PANELS ═══════════ */
+.panel {
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.6));
+  backdrop-filter: blur(8px);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.panel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
-.dropzone {
-  margin-top: 18px;
-  border: 1px dashed rgba(34, 211, 238, 0.55);
-  border-radius: 14px;
-  padding: 20px;
+.panel-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.panel-subtitle {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+/* ═══════════ COLLECTIONS ═══════════ */
+.mode-toggle {
+  display: flex;
+  gap: 2px;
+  border-radius: 6px;
+  background: var(--bg-body);
+  padding: 2px;
+}
+
+.collections-grid {
   display: grid;
-  gap: 16px;
-  background:
-    radial-gradient(circle at 20% 0%, rgba(14, 165, 233, 0.12), transparent 48%),
-    rgba(2, 6, 23, 0.36);
-  min-height: 240px;
-  align-content: center;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 10px;
+}
+
+.col-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: linear-gradient(150deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.4));
+  transition: border-color 0.15s ease;
+}
+
+.col-card:hover {
+  border-color: var(--border-hover);
+}
+
+.col-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.col-card-num {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--accent);
+}
+
+.col-card-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.col-card-range-field {
+  display: grid;
+  gap: 3px;
+}
+
+.col-card-range-label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.col-card-id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-body);
+  border: 1px solid var(--border-default);
+}
+
+.col-card-id-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.col-card-id-value {
+  font-size: 0.72rem;
+  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.col-card-plan {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-glow);
+}
+
+.col-card-plan-range {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.col-card-plan-count {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.col-total-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-body);
+  border: 1px solid var(--border-default);
+}
+
+.col-total-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.col-total-value {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.col-total-unassigned {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.empty-state-mini {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* ═══════════ DROPZONE ═══════════ */
+.dropzone {
+  border: 2px dashed rgba(56, 189, 248, 0.25);
+  border-radius: 12px;
+  padding: 28px;
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  background: transparent;
 }
 
 .dropzone.is-drag-over {
-  border-color: rgba(45, 212, 191, 0.9);
-  background:
-    radial-gradient(circle at 20% 0%, rgba(20, 184, 166, 0.2), transparent 52%),
-    rgba(15, 23, 42, 0.9);
-  box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.35);
+  border-color: var(--accent);
+  background: rgba(56, 189, 248, 0.06);
+  box-shadow: inset 0 0 32px rgba(56, 189, 248, 0.04);
 }
 
-.dropzone p {
+.dropzone-content {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+}
+
+.dropzone-icon {
+  font-size: 2rem;
+  color: var(--text-muted);
+}
+
+.dropzone-text {
   margin: 0;
-}
-
-.dropzone-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.file-picker-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  justify-content: flex-start;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
 }
 
 .hidden-file-input {
   display: none;
 }
 
-.analysis-progress {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid rgba(71, 85, 105, 0.45);
-  border-radius: 12px;
-  background: rgba(2, 6, 23, 0.38);
+/* ═══════════ GLOBAL TAGS ═══════════ */
+.global-tags {
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-body);
+  padding: 10px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
-.analysis-progress-head {
+.global-tags-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
-.analysis-progress-meta {
-  display: grid;
-  gap: 4px;
+/* ═══════════ ANALYSIS ═══════════ */
+.analysis-panel {
+  border-color: rgba(56, 189, 248, 0.3);
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.04), rgba(15, 23, 42, 0.9));
 }
 
-.analysis-progress-title {
-  font-weight: 600;
-  font-size: 0.96rem;
-}
-
-.media-cards {
-  margin-top: 20px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+.analysis-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  min-height: 720px;
-  max-height: 72vh;
-  overflow: auto;
-  padding-right: 4px;
+}
+
+.analysis-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.analysis-status {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+/* ═══════════ PAGINATION ═══════════ */
+.media-pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+}
+
+.media-pagination-bar.bottom {
+  margin-top: 4px;
+}
+
+.media-pagination-btns {
+  display: flex;
+  gap: 2px;
+}
+
+/* ═══════════ MEDIA CARDS ═══════════ */
+.media-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  padding-right: 2px;
 }
 
 .media-card-item {
-  border: 1px solid rgba(71, 85, 105, 0.45);
-  background:
-    linear-gradient(180deg, rgba(15, 23, 42, 0.9), rgba(8, 17, 39, 0.92)),
-    rgba(2, 6, 23, 0.5);
-  box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.08);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  overflow: hidden;
+  transition: border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
 }
 
 .media-card-item:hover {
-  border-color: rgba(56, 189, 248, 0.55);
+  border-color: var(--border-hover);
   transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 
-.media-card-head {
-  display: grid;
-  gap: 8px;
+.media-card-item.is-vip {
+  border-color: rgba(245, 158, 11, 0.45);
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.08);
 }
 
 .media-preview {
   position: relative;
   width: 100%;
-  aspect-ratio: 16 / 10;
-  border: 1px solid rgba(71, 85, 105, 0.45);
-  border-radius: 10px;
+  aspect-ratio: 4 / 5;
   overflow: hidden;
-  background: rgba(2, 6, 23, 0.5);
-}
-
-.vip-overlay {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  z-index: 4;
-  padding: 4px 8px;
-  border-radius: 10px;
-  background: rgba(2, 6, 23, 0.76);
-  border: 1px solid rgba(71, 85, 105, 0.55);
-  backdrop-filter: blur(5px);
-}
-
-.card-top-actions {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 6;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.delete-card-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
-  opacity: 1 !important;
-  visibility: visible !important;
-  box-shadow: 0 8px 16px rgba(2, 6, 23, 0.62);
-}
-
-.delete-card-btn :deep(.iconify) {
-  font-size: 15px;
+  background: var(--bg-body);
 }
 
 .media-preview img,
@@ -2506,115 +2600,205 @@ onBeforeUnmount(() => {
   height: 100%;
   display: grid;
   place-items: center;
-  color: #94a3b8;
-  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-size: 1.5rem;
+}
+
+.delete-card-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 6;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.media-card-item:hover .delete-card-btn {
+  opacity: 1;
+}
+
+.media-type-badge {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  z-index: 4;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(6px);
+  color: var(--text-secondary);
 }
 
 .media-card-body {
+  padding: 10px;
   display: grid;
-  gap: 10px;
+  gap: 6px;
 }
 
+.card-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.card-index {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.vip-toggle {
+  all: unset;
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+  background: transparent;
+  transition: all 0.15s ease;
+}
+
+.vip-toggle:hover {
+  border-color: var(--vip-color);
+  color: var(--vip-color);
+}
+
+.vip-toggle.active {
+  border-color: var(--vip-color);
+  color: var(--bg-body);
+  background: var(--vip-color);
+}
+
+/* ═══════════ TAGS ═══════════ */
 .tag-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  min-height: 28px;
+  gap: 4px;
+  min-height: 22px;
 }
 
 .tag-badge {
   cursor: pointer;
+  font-size: 0.68rem;
 }
 
 .tag-input-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 4px;
   align-items: center;
 }
 
-.content-summary {
+/* ═══════════ AI VISION ═══════════ */
+.ai-vision {
   display: flex;
   gap: 6px;
-  padding: 8px 10px;
+  align-items: flex-start;
+  padding: 6px 8px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--ui-color-info) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ui-color-info) 20%, transparent);
-  font-size: 0.8rem;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-glow);
+  font-size: 0.72rem;
   line-height: 1.4;
 }
 
-.collection-gen-result {
-  display: grid;
-  gap: 10px;
+.ai-vision-icon {
+  flex-shrink: 0;
 }
 
-.collection-gen-field {
-  display: grid;
-  gap: 4px;
+.ai-vision-text {
+  color: var(--text-secondary);
 }
 
-.collection-gen-text {
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--ui-bg-muted);
-  border: 1px solid var(--ui-border);
-  font-size: 0.9rem;
-  line-height: 1.5;
-  user-select: all;
-  word-break: break-word;
-}
-
-.summary-label {
-  font-weight: 600;
-  white-space: nowrap;
-  color: var(--ui-color-info);
-}
-
-.summary-text {
-  color: var(--ui-text-muted);
-}
-
+/* ═══════════ TRENDS ═══════════ */
 .trend-section {
   display: grid;
-  gap: 6px;
-  padding: 10px;
+  gap: 4px;
+  padding: 6px 8px;
   border-radius: 8px;
-  background: var(--ui-bg-muted);
-  border: 1px solid var(--ui-border);
+  background: var(--bg-body);
+  border: 1px solid var(--border-default);
 }
 
 .trend-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
 }
 
 .trend-label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--ui-text-muted);
+  font-size: 0.75rem;
 }
 
 .trend-terms {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px;
 }
 
-.trend-none {
-  font-size: 0.75rem;
-  color: var(--ui-text-dimmed);
-  margin: 0;
+/* ═══════════ ALERTS ═══════════ */
+.alert-toast {
+  border-radius: 10px;
 }
 
-.actions-row {
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* ═══════════ EMPTY STATE ═══════════ */
+.empty-state {
+  grid-column: 1 / -1;
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  padding: 48px 24px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.empty-icon {
+  font-size: 2.5rem;
+  color: var(--text-muted);
+}
+
+/* ═══════════ DRAWERS ═══════════ */
+.drawer-body {
+  display: grid;
+  gap: 16px;
+  padding: 6px 2px;
+}
+
+.drawer-footer {
+  width: 100%;
+}
+
+.drawer-actions {
+  width: 100%;
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.drawer-textarea :deep(textarea) {
+  width: 100%;
+  min-height: min(76vh, 1080px);
+}
+
+/* ═══════════ SETTINGS ═══════════ */
 .triple-grid {
   display: grid;
   gap: 12px;
@@ -2628,10 +2812,11 @@ onBeforeUnmount(() => {
 
 .field-label {
   margin: 0;
-  font-size: 0.75rem;
-  letter-spacing: 0.04em;
+  font-size: 0.65rem;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--text-muted);
+  font-weight: 600;
 }
 
 .field-action {
@@ -2657,52 +2842,31 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.drawer-body {
-  display: grid;
-  gap: 16px;
-  padding: 6px 2px;
-}
-
-.drawer-footer {
-  width: 100%;
-}
-
-.drawer-actions {
-  width: 100%;
-  display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.drawer-textarea :deep(textarea) {
-  width: 100%;
-  min-height: min(76vh, 1080px);
-}
-
+/* ═══════════ UTILITY ═══════════ */
 .muted-text {
   margin: 0;
-  font-size: 0.86rem;
-  color: #94a3b8;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
 }
 
-.run-log-area {
-  width: 100%;
+.small-text {
+  font-size: 0.72rem;
 }
 
-.run-log-area :deep(textarea) {
-  width: 100%;
-  min-height: min(72vh, 920px);
+.flex-1 {
+  flex: 1;
 }
 
-@media (max-width: 1320px) {
+/* ═══════════ RESPONSIVE ═══════════ */
+@media (max-width: 1200px) {
   .studio-layout {
-    grid-template-columns: 290px minmax(0, 1fr);
+    grid-template-columns: 250px minmax(0, 1fr);
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 900px) {
   .studio-shell {
-    padding: 12px;
+    padding: 8px;
   }
 
   .topbar {
@@ -2714,38 +2878,28 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
-  .actions-row {
-    grid-template-columns: 1fr;
+  .left-sidebar {
+    position: static;
+    max-height: none;
   }
 
   .drawer-actions {
     grid-template-columns: 1fr;
   }
-
-  .media-cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .upload-collection-row {
-    grid-template-columns: 1fr;
-  }
-
-  .upload-plan-item {
-    flex-direction: column;
-    align-items: stretch;
-  }
 }
 
 @media (max-width: 640px) {
   .media-cards {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .upload-collections-actions,
-  .upload-collections-badges,
-  .distribution-mode-row {
+  .panel-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .panel-header-right {
+    justify-content: flex-start;
   }
 }
 </style>

@@ -20,5 +20,12 @@ export default defineNuxtConfig({
   typescript: {
     strict: true,
     typeCheck: true
+  },
+  vite: {
+    server: {
+      watch: {
+        ignored: ["**/.env", "**/state.json"]
+      }
+    }
   }
 });

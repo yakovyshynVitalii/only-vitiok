@@ -18,8 +18,8 @@ vi.mock("~/server/utils/settings", () => ({
 }));
 
 describe("POST /api/run/generate-collection", () => {
-  test("injects model name into description when model omits it", async () => {
-    mocks.readBody.mockResolvedValue({ modelName: "LunaFox" });
+  test("generates provocative title and description from prompt", async () => {
+    mocks.readBody.mockResolvedValue({ prompt: "Persian Baby photo leaks Part 1" });
     mocks.readSettings.mockReturnValue({
       env: {
         OLLAMA_URL: "http://127.0.0.1:11434",
@@ -33,8 +33,8 @@ describe("POST /api/run/generate-collection", () => {
         json: async () => ({
           message: {
             content: JSON.stringify({
-              title: "💋 LunaFox Wants You",
-              description: "Hey babe, come get closer and follow for more 😈",
+              title: "🔥 Persian Baby Exposed — Forbidden Leaks",
+              description: "These leaked pics were never meant for your eyes 😈 But here I am, dripping and begging you to see more 💦",
             }),
           },
         }),
@@ -45,13 +45,13 @@ describe("POST /api/run/generate-collection", () => {
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 
-    expect(result.title).toBe("💋 LunaFox Wants You");
-    expect(result.description).toContain("LunaFox");
-    expect(result.description).toContain("Hey babe");
+    expect(result.title).toBe("🔥 Persian Baby Exposed — Forbidden Leaks");
+    expect(result.description).toContain("leaked");
+    expect(result.prompt).toBe("Persian Baby photo leaks Part 1");
   });
 
-  test("injects primary keyword into title when model omits nickname", async () => {
-    mocks.readBody.mockResolvedValue({ modelName: "Selti | Seltin_sweety" });
+  test("sends system prompt for provocative generation", async () => {
+    mocks.readBody.mockResolvedValue({ prompt: "Hot blonde selfies collection" });
     mocks.readSettings.mockReturnValue({
       env: {
         OLLAMA_URL: "http://127.0.0.1:11434",
@@ -62,18 +62,19 @@ describe("POST /api/run/generate-collection", () => {
       "fetch",
       vi.fn(async (_url, init) => {
         const payload = JSON.parse(String(init?.body || "{}"));
-        expect(payload.messages[0].content).toContain('Primary SEO keyword: "Selti"');
-        expect(payload.messages[0].content).toContain(
-          'Supporting SEO keywords: "Selti, Seltin_sweety"'
-        );
+        expect(payload.messages).toHaveLength(2);
+        expect(payload.messages[0].role).toBe("system");
+        expect(payload.messages[0].content).toContain("provocative");
+        expect(payload.messages[1].role).toBe("user");
+        expect(payload.messages[1].content).toContain("Hot blonde selfies collection");
 
         return {
           ok: true,
           json: async () => ({
             message: {
               content: JSON.stringify({
-                title: "Midnight Temptation",
-                description: "Come closer and keep your eyes on me 😈",
+                title: "💋 Hot Blonde Uncensored Selfies",
+                description: "These selfies are way too hot for Instagram 😈",
               }),
             },
           }),
@@ -85,12 +86,11 @@ describe("POST /api/run/generate-collection", () => {
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
 
-    expect(result.title).toContain("Selti");
-    expect(result.description).toContain("Selti");
+    expect(result.title).toContain("Blonde");
   });
 
-  test("does not duplicate model name when it is already in description", async () => {
-    mocks.readBody.mockResolvedValue({ modelName: "NikaStar" });
+  test("truncates title and description to max length", async () => {
+    mocks.readBody.mockResolvedValue({ prompt: "test prompt" });
     mocks.readSettings.mockReturnValue({
       env: {
         OLLAMA_URL: "http://127.0.0.1:11434",
@@ -104,8 +104,8 @@ describe("POST /api/run/generate-collection", () => {
         json: async () => ({
           message: {
             content: JSON.stringify({
-              title: "🔥 NikaStar After Dark",
-              description: "I'm NikaStar, and I know how to keep you hooked 😈",
+              title: "A".repeat(100),
+              description: "B".repeat(250),
             }),
           },
         }),
@@ -115,8 +115,8 @@ describe("POST /api/run/generate-collection", () => {
     const handler = (await import("../../server/api/run/generate-collection.post")).default;
     const event = {} as Parameters<typeof handler>[0];
     const result = await handler(event);
-    const matches = result.description.match(/NikaStar/gi) || [];
 
-    expect(matches).toHaveLength(1);
+    expect(result.title.length).toBeLessThanOrEqual(80);
+    expect(result.description.length).toBeLessThanOrEqual(200);
   });
 });

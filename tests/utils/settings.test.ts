@@ -180,6 +180,7 @@ describe("settings utils", () => {
       envText: "",
       collectionId: "",
       autoUploadAfterAnalyze: false,
+      globalTagLimit: 15 as const,
       uploadDistributionMode: "range" as const,
       uploadCollections: [],
     };

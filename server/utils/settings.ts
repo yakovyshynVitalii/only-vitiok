@@ -17,6 +17,7 @@ export interface AppSettings {
   envText: string;
   collectionId: string;
   autoUploadAfterAnalyze: boolean;
+  globalTagLimit: number;
   uploadDistributionMode: UploadDistributionMode;
   uploadCollections: UploadCollectionTarget[];
 }
@@ -48,6 +49,10 @@ function sortEnvKeys(env: Record<string, string>): Record<string, string> {
 function extractCollectionId(createUrl: string): string {
   const match = String(createUrl || "").match(/\/collection\/([^/?#]+)/i);
   return match?.[1] ?? "";
+}
+
+function stripLocaleFromCollectionUrl(url: string): string {
+  return String(url || "").replace(/\/[a-z]{2}(\/collection\/)/i, "$1");
 }
 
 function buildCreateUrl(baseUrl: string, collectionId: string): string {
@@ -85,8 +90,8 @@ function normalizeUploadCollectionTarget(
     | undefined,
   baseUrl: string
 ): UploadCollectionTarget | null {
-  const collectionId = String(input?.collectionId || "").trim();
-  const explicitCreateUrl = String(input?.createUrl || "").trim();
+  const explicitCreateUrl = stripLocaleFromCollectionUrl(String(input?.createUrl || "").trim());
+  const collectionId = String(input?.collectionId || "").trim() || extractCollectionId(explicitCreateUrl);
   const createUrl = explicitCreateUrl || buildCreateUrl(baseUrl, collectionId);
   let rangeStart = normalizeRangePoint(input?.rangeStart);
   let rangeEnd = normalizeRangePoint(input?.rangeEnd);
@@ -185,12 +190,14 @@ export function readSettings(): AppSettings {
     env.AUTO_UPLOAD_AFTER_ANALYZE,
     false
   );
+  const globalTagLimit = env.GLOBAL_TAG_LIMIT === "100" ? 100 : 15;
 
   return {
     env,
     envText,
     collectionId: uploadCollections[0]?.collectionId || collectionId,
     autoUploadAfterAnalyze,
+    globalTagLimit,
     uploadDistributionMode,
     uploadCollections,
   };
@@ -200,6 +207,7 @@ export function writeSettings(input: {
   env?: Record<string, string>;
   collectionId?: string;
   autoUploadAfterAnalyze?: boolean;
+  globalTagLimit?: number;
   uploadDistributionMode?: UploadDistributionMode;
   uploadCollections?: Array<
     Partial<UploadCollectionTarget> & {
@@ -283,6 +291,10 @@ export function writeSettings(input: {
     nextEnv.AUTO_UPLOAD_AFTER_ANALYZE = input.autoUploadAfterAnalyze
       ? "true"
       : "false";
+  }
+
+  if (typeof input.globalTagLimit === "number") {
+    nextEnv.GLOBAL_TAG_LIMIT = input.globalTagLimit === 100 ? "100" : "15";
   }
 
   if (typeof input.uploadDistributionMode === "string") {

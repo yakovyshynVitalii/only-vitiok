@@ -6,7 +6,19 @@
 @import "@nuxt/ui";
 
 :root {
-  --ui-color-neutral-900: var(--color-slate-900, oklch(20.8% 0.042 265.755));
+  --bg-body: #0b1120;
+  --bg-surface: #0f172a;
+  --bg-raised: #1e293b;
+  --border-default: #1e293b;
+  --border-hover: #334155;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #38bdf8;
+  --accent-soft: rgba(56, 189, 248, 0.10);
+  --accent-glow: rgba(56, 189, 248, 0.15);
+  --vip-color: #f59e0b;
+  --danger: #ef4444;
 }
 
 html,
@@ -18,6 +30,25 @@ body,
 body {
   margin: 0;
   font-family: "Roboto", "Segoe UI", system-ui, sans-serif;
-  background: var(--ui-color-neutral-900);
-  color: #e2e8f0;
+  background: var(--bg-body);
+  color: var(--text-primary);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
 }

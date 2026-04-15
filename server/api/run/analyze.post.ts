@@ -22,7 +22,7 @@ export default defineEventHandler(async () => {
   const importedFromRoot = importProjectRootMediaFiles(settings, mediaFolder);
   const autoUpload = parseBool(settings.env.AUTO_UPLOAD_AFTER_ANALYZE, false);
   const ollamaUrl = settings.env.OLLAMA_URL || "http://127.0.0.1:11434";
-  const ollamaModel = settings.env.OLLAMA_MODEL || "qwen2.5vl:3b-q4_K_M";
+  const ollamaModel = settings.env.OLLAMA_MODEL || "qwen2.5vl:7b";
   const runtimeLogs: string[] = [];
 
   if (importedFromRoot.imported.length) {

@@ -4,39 +4,44 @@ const os = require("os");
 const { spawnSync } = require("child_process");
 const googleTrends = (() => { try { return require("google-trends-api"); } catch { return null; } })();
 
-const TARGET_GLOBAL_HASHTAGS = 15;
+const TARGET_GLOBAL_HASHTAGS = Number(process.env.GLOBAL_TAG_LIMIT) === 100 ? 100 : 15;
 const MAX_ITEM_HASHTAGS = 12;
-const VIDEO_ANALYSIS_FRAME_COUNT = 1;
+const DEFAULT_AI_IMAGE_MAX_SIZE = 384;
+const DEFAULT_VIDEO_ANALYSIS_FRAME_COUNT = 2;
+const DEFAULT_OLLAMA_NUM_PREDICT = 360;
 const TITLE_EMOJIS = ["🔥", "💋", "✨", "😈", "🥵", "🍑", "👅", "🫦", "❤️‍🔥"];
 const DESCRIPTION_EMOJIS = [
   "💦", "🌶", "🖤", "💞", "🔞", "🍒", "🍓", "😮‍💨", "🤤",
 ];
 const TITLE_STYLE_GUIDES = [
-  "confession style: start with I / I'm / I just and mention the specific mood or action",
-  "invitation style: use a playful invite tied to the visible scene, not a generic tease",
-  "reveal style: hint at the exact outfit, pose, body part, or action that is visible",
-  "setting style: mention the location or situation if it is clearly visible",
-  "question style: ask one teasing question based on the actual scene",
-  "bratty one-liner style: short, bold, cocky, and scene-specific",
+  "leaked style: dirty leaked content — 'My ex leaked this and now you see my wet pussy' / 'Someone stole my nudes and I don't even care'",
+  "tease style: slutty teasing — 'Ripped off my bra come stare at my tits' / 'Bent over with nothing on wanna see more'",
+  "brag style: dirty bragging — 'My fat ass in this thong makes you hard huh' / 'These tits are why you can't stop jerking off'",
+  "dare style: slutty dare — 'Bet you cum before you finish scrolling' / 'Try not to get hard looking at my naked ass'",
+  "confession style: dirty confession — 'Took these nudes while my roommate slept next door' / 'Couldn't stop touching myself and had to film it'",
+  "homemade style: raw slutty amateur — 'Real homemade pussy pic from my bed' / 'Just filmed myself naked in the mirror no filter'",
 ];
 const BANNED_TITLE_PHRASES = [
   "come see what's under my",
   "just got out of the shower",
-  "i can't stop touching myself",
+  "exclusive content",
+  "subscribe to see more",
 ];
 const TITLE_DUPLICATE_FALLBACKS = [
-  "Take a closer look at me",
-  "I'm teasing you on purpose",
-  "You know you want more",
-  "I'm in such a naughty mood",
-  "Wanna get a little closer",
-  "I've been waiting for you",
+  "Wasn't supposed to post this but here we are",
+  "Leaked from my private gallery oops",
+  "This was just for me but fuck it",
+  "Too horny not to share this",
+  "My private content just got out",
+  "Caught on camera and I don't even care",
+  "This wasn't meant for you but enjoy",
+  "Someone leaked my private album",
 ];
 const DESCRIPTION_LEAK_PHRASES = [
-  "Just a little leak for you",
-  "I'm giving you a teasing leak",
-  "This is only a tiny leak of what's next",
-  "These naughty leaks are just the start",
+  "Wasn't supposed to post this but I'm too horny to care",
+  "My ex had these saved and now the whole internet sees me naked",
+  "Someone found my private album and honestly it's hot that you're looking",
+  "This was just for me but why keep this body to myself",
 ];
 const PRIORITY_TRIGGER_TAGS = [
   "hot",
@@ -328,6 +333,16 @@ async function fetchRealTrends() {
 /* ------------------------------------------------------------------ */
 
 function getEnv() {
+  const parseNumber = (value, fallback, min, max) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, Math.round(parsed)));
+  };
+  const parseBool = (value, fallback = false) => {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    if (!normalized) return fallback;
+    return normalized === "1" || normalized === "true" || normalized === "yes";
+  };
   const parsedConcurrency = Number(process.env.AI_ANALYSIS_CONCURRENCY || 3);
   const aiConcurrency = Number.isFinite(parsedConcurrency)
     ? Math.max(1, Math.min(8, Math.round(parsedConcurrency)))
@@ -345,6 +360,26 @@ function getEnv() {
   return {
     OLLAMA_URL: ollamaUrl,
     OLLAMA_MODEL: process.env.OLLAMA_MODEL || "qwen2.5vl:7b",
+    OLLAMA_KEEP_ALIVE: process.env.OLLAMA_KEEP_ALIVE || "30m",
+    OLLAMA_NUM_PREDICT: parseNumber(
+      process.env.OLLAMA_NUM_PREDICT,
+      DEFAULT_OLLAMA_NUM_PREDICT,
+      180,
+      800
+    ),
+    AI_IMAGE_MAX_SIZE: parseNumber(
+      process.env.AI_IMAGE_MAX_SIZE,
+      DEFAULT_AI_IMAGE_MAX_SIZE,
+      256,
+      768
+    ),
+    VIDEO_ANALYSIS_FRAME_COUNT: parseNumber(
+      process.env.VIDEO_ANALYSIS_FRAME_COUNT,
+      DEFAULT_VIDEO_ANALYSIS_FRAME_COUNT,
+      1,
+      6
+    ),
+    VIP_RECHECK: parseBool(process.env.VIP_RECHECK, false),
     AI_ANALYSIS_CONCURRENCY: aiConcurrency,
     MODEL_RETRY_COUNT: modelRetryCount,
     MEDIA_FOLDER: path.resolve(process.env.MEDIA_FOLDER || "./media"),
@@ -375,6 +410,40 @@ function isLowQualityModelOutput({ title, description, hashtags, filename }) {
   const fileWords = baseName.split(/[\s_\-]+/).filter((w) => w.length > 8);
   if (fileWords.some((word) => normalizedTitle.includes(word))) return true;
   if (normalizedDescription.startsWith("sexy media content")) return true;
+
+  // Detect clinical/narrator language — model writes like an art critic instead of a real girl
+  const clinicalPatterns = [
+    /\bshowcasing\b/i,
+    /\bon full display\b/i,
+    /\bconfidently\b/i,
+    /\baccentuat/i,
+    /\bhighlighting\b/i,
+    /\bnothing more to see\b/i,
+    /\ball its glory\b/i,
+    /\bthe perfect curve\b/i,
+    /\bmaking .{0,20} stand out\b/i,
+    /\bintricate design\b/i,
+    /\bthe background is\b/i,
+    /\bsilhouette\b/i,
+  ];
+  const clinicalHits = clinicalPatterns.filter(p => p.test(normalizedDescription)).length;
+  if (clinicalHits >= 2) return true;
+
+  // Detect narrator-style descriptions that start with pose/action descriptions
+  // Real girls don't write "Standing in front of mirror, fully nude..."
+  const narratorStartPatterns = [
+    /^standing\s+(in|confidently|nude|naked|in front)/i,
+    /^sitting\s+(on|in|naked|nude)/i,
+    /^lying\s+(on|in|naked|nude|down)/i,
+    /^showing\s+(off|her|my|the)/i,
+    /^posing\s+(in|with|naked|nude)/i,
+    /^wearing\s+(a|her|nothing|black|white|red)/i,
+    /^fully\s+(nude|naked)/i,
+    /^a\s+(young|beautiful|hot|sexy|stunning)\s+(woman|girl)/i,
+    /^the\s+(image|photo|picture|video)\s+(shows|features|depicts)/i,
+  ];
+  if (narratorStartPatterns.some(p => p.test(normalizedDescription))) return true;
+  if (narratorStartPatterns.some(p => p.test(normalizedTitle))) return true;
 
   return false;
 }
@@ -415,22 +484,8 @@ function normalizeTags(tags) {
 }
 
 function sortTagsByPriority(tags) {
-  const priorityIndex = new Map(
-    PRIORITY_TRIGGER_TAGS.map((tag, index) => [normalizeHashtag(tag), index])
-  );
-
-  return [...new Set(tags)].sort((a, b) => {
-    const normalizedA = normalizeHashtag(a);
-    const normalizedB = normalizeHashtag(b);
-    const priorityA = priorityIndex.get(normalizedA);
-    const priorityB = priorityIndex.get(normalizedB);
-
-    if (priorityA != null && priorityB != null) return priorityA - priorityB;
-    if (priorityA != null) return -1;
-    if (priorityB != null) return 1;
-
-    return normalizedA.localeCompare(normalizedB);
-  });
+  // Keep model's original order — it picks the most relevant tags first
+  return [...new Set(tags)];
 }
 
 function loadAllowedTags(filePath) {
@@ -471,15 +526,25 @@ function sanitizeEnglishText(value, fallback = "") {
   return cleaned || fallback;
 }
 
-function removeOverusedTitleWords(title, fallback = "Sexy moment") {
+function removeOverusedTitleWords(title, fallback = "My leaked nudes") {
   const cleaned = String(title || "")
     .replace(/\bsensual\b/gi, " ")
-    .replace(/\bsolo\b/gi, " ")
     .replace(/\bvideo\b/gi, " ")
     .replace(/\bcontent\b/gi, " ")
     .replace(/\bclip\b/gi, " ")
     .replace(/\bmedia\b/gi, " ")
     .replace(/\bfootage\b/gi, " ")
+    .replace(/\bmoment\b/gi, " ")
+    .replace(/\bshowcasing\b/gi, " ")
+    .replace(/\baccentuat\w*\b/gi, " ")
+    .replace(/\bhighlighting\b/gi, " ")
+    .replace(/\bconfidently\b/gi, " ")
+    .replace(/\bsilhouette\b/gi, " ")
+    .replace(/\bintricate\b/gi, " ")
+    .replace(/\bcomplement\w*\b/gi, " ")
+    .replace(/\bon full display\b/gi, " ")
+    .replace(/\bstand(s|ing)? out\b/gi, " ")
+    .replace(/\bfeatures\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -518,10 +583,179 @@ function pickFromPool(seed, pool) {
   return pool[hashSeed(seed) % pool.length];
 }
 
+const VIP_NIPPLE_COVER_PATTERNS = [
+  /\bwearing\s+(a\s+)?(bra|bikini|bikini\s+top|top|shirt|crop\s+top|dress|corset|bustier|bodysuit|swimsuit)\b/i,
+  /\b(in|with)\s+(a\s+)?(bra|bikini|bikini\s+top|top|shirt|crop\s+top|dress|corset|bustier|bodysuit|swimsuit)\b/i,
+  /\b(bra|bikini|bikini\s+top|top|shirt|dress|corset|bustier|bodysuit|swimsuit)\s+(is\s+)?(on|covering)\b/i,
+  /\bnipples?\s+(are\s+)?(hidden|covered|obscured|not\s+visible)\b/i,
+  /\b(no\s+visible\s+nipple|nipples?\s+not\s+visible)\b/i,
+  /\bcovering\s+(her\s+)?(nipple|breast|chest)\b/i,
+  /\bcovered\s+(nipple|breast|chest)s?\b/i,
+  /\b(hands?|arms?)\s+(cover|covering|hide|hiding|obscure|obscuring)\s+(her\s+)?(nipples?|breasts?|chest)\b/i,
+];
+
+const VIP_PUSSY_COVER_PATTERNS = [
+  /\bwearing\s+(a\s+)?(panties|thong|underwear|bikini|bikini\s+bottoms?|bodysuit|swimsuit|shorts|pants|jeans|skirt)\b/i,
+  /\b(in|with)\s+(a\s+)?(panties|thong|underwear|bikini|bikini\s+bottoms?|bodysuit|swimsuit|shorts|pants|jeans|skirt)\b/i,
+  /\b(panties|thong|underwear|bikini|bikini\s+bottoms?|bodysuit|swimsuit|shorts|pants|jeans|skirt)\s+(is\s+|are\s+)?(on|covering)\b/i,
+  /\b(pussy|vagina|vulva|labia|crotch)\s+(is\s+|are\s+)?(hidden|covered|obscured|not\s+visible)\b/i,
+  /\b(no\s+visible\s+(pussy|vagina|vulva|labia|crotch)|(pussy|vagina|vulva|labia|crotch)\s+not\s+visible)\b/i,
+  /\bcovering\s+(her\s+)?(pussy|vagina|vulva|labia|crotch)\b/i,
+  /\bcovered\s+(pussy|vagina|vulva|labia|crotch)\b/i,
+  /\b(hands?|arms?)\s+(cover|covering|hide|hiding|obscure|obscuring)\s+(her\s+)?(pussy|vagina|vulva|labia|crotch)\b/i,
+];
+
+function hasPattern(text, patterns) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function deriveVipFromContent(contentSummary) {
+  const summary = String(contentSummary || "");
+  const summaryLower = summary.toLowerCase();
+
+  const markerNipplesYes = /\bNUDE_NIPPLES\s*=\s*YES\b/i.test(summary);
+  const markerPussyYes = /\bNUDE_PUSSY\s*=\s*YES\b/i.test(summary);
+  const markerNipplesNo = /\bNUDE_NIPPLES\s*=\s*NO\b/i.test(summary);
+  const markerPussyNo = /\bNUDE_PUSSY\s*=\s*NO\b/i.test(summary);
+
+  const keywordNipples = /\b(bare\s+(nipples?|breasts?|boobs?|tits?|chest)|nude\s+(breasts?|boobs?|tits?)|naked\s+(breasts?|boobs?|tits?|chest)|topless|wet\s+nipples?|no\s+bra\s+(visible|present|on)?|no\s+visible\s+clothing.{0,80}\b(nipples?|breasts?|boobs?|tits?|chest)|\b(nipples?|breasts?|boobs?|tits?|chest).{0,80}no\s+visible\s+clothing|(nipples?|breasts?|boobs?|tits?)\s+(are\s+|is\s+)?(visible|exposed|showing|shown|displayed|prominently\s+displayed|bare|wet)|exposed\s+(nipples?|breasts?|boobs?|tits?))\b/i.test(summaryLower);
+  const keywordPussy = /\b(wetpussy|bare\s+(pussy|vagina|vulva|labia|crotch)|nude\s+(pussy|vagina|vulva|labia|crotch|lower\s+body)|naked\s+(pussy|vagina|vulva|labia|crotch|lower\s+body)|visible\s+(pussy|vagina|vulva|labia|crotch)|no\s+(panties|thong|underwear|bikini\s+bottoms?)\s+(visible|present|on)?|((pussy|vagina|vulva|labia|crotch)\s+(is\s+|are\s+)?(visible|exposed|showing|shown|displayed|bare|wet))|exposed\s+(pussy|vagina|vulva|labia|crotch)|wet\s+(pussy|vagina|vulva|labia|crotch))\b/i.test(summaryLower);
+  const fullNudeBody = /\b(fully\s+(nude|naked)|completely\s+(nude|naked)|nude\s+(woman|girl|body|blonde|brunette)|naked\s+(woman|girl|body|blonde|brunette)|wearing\s+nothing|nothing\s+on|no\s+clothes|without\s+clothes)\b/i.test(summaryLower);
+  const explicitlyAssOnly = /\b(bare\s+ass\s+alone|bare\s+buttocks?\s+alone|only\s+(her\s+)?(ass|buttocks?|butt)\s+(is\s+)?visible)\b/i.test(summaryLower);
+
+  const nipplesCovered = hasPattern(summaryLower, VIP_NIPPLE_COVER_PATTERNS);
+  const pussyCovered = hasPattern(summaryLower, VIP_PUSSY_COVER_PATTERNS);
+
+  const hasBareNipples = (markerNipplesYes || (!markerNipplesNo && keywordNipples)) && !nipplesCovered;
+  const hasBarePussy = (markerPussyYes || (!markerPussyNo && keywordPussy)) && !pussyCovered;
+  const hasFullNudeBody = fullNudeBody && !explicitlyAssOnly && (!nipplesCovered || !pussyCovered);
+
+  return hasBareNipples || hasBarePussy || hasFullNudeBody;
+}
+
+function shouldRunVipRecheck(contentSummary, hashtags = []) {
+  const summary = String(contentSummary || "").toLowerCase();
+  const tags = normalizeTags(hashtags);
+  const tagSignals = new Set(["nude", "naked", "pussy"]);
+
+  return (
+    /\b(nude|naked|topless|bare\s+(body|back|buttocks|ass|breasts?|boobs?|tits?|chest|crotch)|no\s+(bra|panties|thong|underwear))\b/i.test(summary) ||
+    tags.some((tag) => tagSignals.has(tag))
+  );
+}
+
+function deriveVipFromItemEvidence({ contentSummary, title, description, hashtags } = {}) {
+  const tagText = normalizeTags(hashtags || []).join(" ");
+  return deriveVipFromContent(
+    [contentSummary, title, description, tagText].filter(Boolean).join(" ")
+  );
+}
+
+// Tags that MUST be confirmed by contentSummary keywords — both actions AND body parts
+const TAG_CONTENT_REQUIREMENTS = {
+  // Body-part tags — MUST be visible in contentSummary
+  pussy: /\b(pussy|vagina|vulva|labia|clit|NUDE_PUSSY=YES)\b/i,
+  wetpussy: /\b(wet\s+pussy|dripping|soaking|NUDE_PUSSY=YES)\b/i,
+  nude: /\b(nude|naked|completely\s+naked|nothing|no\s+cloth|NUDE_NIPPLES=YES|NUDE_PUSSY=YES|NUDE_ASS=YES)\b/i,
+  naked: /\b(naked|nude|completely\s+naked|nothing|NUDE_NIPPLES=YES|NUDE_PUSSY=YES|NUDE_ASS=YES)\b/i,
+  ass: /\b(ass|butt|booty|buttocks|rear|behind|cheeks)\b/i,
+  bigass: /\b(big\s+ass|large\s+ass|big\s+butt|thick\s+ass|round\s+ass|big\s+booty)\b/i,
+  bigtits: /\b(big\s+(tits|breasts|boobs)|large\s+(tits|breasts|boobs)|huge\s+(tits|breasts|boobs))\b/i,
+  boobs: /\b(boobs|breasts|tits|chest|nipple)\b/i,
+  nipples: /\b(nipple|areola|NUDE_NIPPLES=YES)\b/i,
+  feet: /\b(feet|foot|toes|sole)\b/i,
+  stockings: /\b(stockings|thigh\s+highs|nylons|fishnets)\b/i,
+  dildo: /\b(dildo|toy|vibrator|wand)\b/i,
+  masturbation: /\b(masturbat|touching\s+(herself|myself)|fingering|playing\s+with\s+(herself|myself|her\s+pussy))\b/i,
+  masturbate: /\b(masturbat|touching\s+(herself|myself)|fingering|playing\s+with)\b/i,
+  fingering: /\b(finger|fingering|fingers\s+in)\b/i,
+  // Action-specific tags
+  blowjob: /\b(blowjob|sucking|suck(s|ing)?\s+(cock|dick|penis)|oral\s+sex|giving\s+head|mouth\s+on\s+(cock|dick|penis))\b/i,
+  deepthroat: /\b(deepthroat|deep\s+throat|gagging|throat\s+fuck)\b/i,
+  anal: /\b(anal|anus|butt\s*(fuck|sex|plug|play))\b/i,
+  analsex: /\b(anal\s*sex|anal\s+penetrat|dick\s+in\s+(her\s+)?ass)\b/i,
+  analcreampie: /\b(anal\s*creampie|cum\s+in\s+(her\s+)?ass)\b/i,
+  strapon: /\b(strap\s*on|pegging|harness)\b/i,
+  threesome: /\b(threesome|3some|three\s*(way|some)|two\s+(guys?|girls?|men|women))\b/i,
+  "3some": /\b(threesome|3some|three\s*(way|some))\b/i,
+  lesbian: /\b(lesbian|girl\s+on\s+girl|two\s+girls|two\s+women|kissing\s+(another\s+)?girl)\b/i,
+  interracial: /\b(interracial|bbc|different\s+race)\b/i,
+  bbc: /\b(bbc|big\s+black\s+cock)\b/i,
+  squirting: /\b(squirt|squirting|gush)\b/i,
+  creampie: /\b(creampie|cum\s+inside|cum\s+in\s+(her\s+)?pussy)\b/i,
+  cumshot: /\b(cumshot|cum\s+shot|cum\s+on|facial|cum\s+dripping)\b/i,
+  facial: /\b(facial|cum\s+on\s+(her\s+)?face)\b/i,
+  cuminmouth: /\b(cum\s+in\s+(her\s+)?mouth|swallow)\b/i,
+  cunnilingus: /\b(cunnilingus|licking\s+pussy|eating\s+(her\s+)?(out|pussy))\b/i,
+  facesitting: /\b(facesit|face\s*sit|sitting\s+on\s+(his\s+)?face)\b/i,
+  rimjob: /\b(rimjob|rim\s+job|rimming|licking\s+(his|her)?\s*ass)\b/i,
+  rimming: /\b(rimjob|rimming|licking\s+(his|her)?\s*ass)\b/i,
+  titfuck: /\b(titfuck|tit\s*fuck|titjob|tit\s*job|between\s+(her\s+)?breasts)\b/i,
+  titjob: /\b(titfuck|tit\s*fuck|titjob|tit\s*job)\b/i,
+  ridingcock: /\b(riding\s+(cock|dick|him)|cowgirl|reverse\s+cowgirl)\b/i,
+  ridingdick: /\b(riding\s+(cock|dick|him)|cowgirl|reverse\s+cowgirl)\b/i,
+  publicsex: /\b(public\s*(sex|fuck)|outdoor\s*(sex|fuck)|outside)\b/i,
+  outdoorsex: /\b(outdoor\s*(sex|fuck)|outside|public\s+park)\b/i,
+  showersex: /\b(shower\s*(sex|fuck)|bathroom\s*(sex|fuck))\b/i,
+  kitchensex: /\b(kitchen\s*(sex|fuck))\b/i,
+  doggystyle: /\b(dogg(y|ie)\s*style|from\s+behind|bent\s+over.*penetrat)\b/i,
+  missionary: /\b(missionary|on\s+her\s+back.*penetrat)\b/i,
+  cowgirl: /\b(cowgirl|riding\s+(on\s+top|him|cock|dick))/i,
+  reversecowgirl: /\b(reverse\s+cowgirl)/i,
+  girlongirl: /\b(girl\s+on\s+girl|lesbian|two\s+girls)\b/i,
+  twogirl: /\b(two\s*girl|girl\s+on\s+girl|lesbian|both\s+girls)\b/i,
+};
+
+function validateTagsFromContent(tags, contentSummary) {
+  const summary = String(contentSummary || "").toLowerCase();
+  return tags.filter((tag) => {
+    const normalizedTag = normalizeHashtag(tag);
+    const requirement = TAG_CONTENT_REQUIREMENTS[normalizedTag];
+    // If no requirement defined, keep the tag (it's a descriptive tag like "blonde", "busty")
+    if (!requirement) return true;
+    // Action tag — must be confirmed by content summary
+    return requirement.test(summary);
+  });
+}
+
 function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
-  const base = String(text || "").trim();
+  let base = String(text || "").trim();
+
+  // Strip narrator-style openings (model loves starting with "Standing...", "Sitting...", etc.)
+  base = base
+    .replace(/^Standing\s+(in\s+front\s+of\s+\w+\s*,?\s*)?/i, "")
+    .replace(/^Sitting\s+(on\s+\w+\s*,?\s*)?/i, "")
+    .replace(/^Lying\s+(on\s+\w+\s*,?\s*)?/i, "")
+    .replace(/^Showing\s+(off\s+)?/i, "")
+    .replace(/^Posing\s+(in\s+)?/i, "")
+    .replace(/^Wearing\s+/i, "Got on ")
+    .replace(/^Fully\s+(nude|naked)\s*,?\s*/i, "Naked and ")
+    .trim();
+
+  // Strip clinical/narrator phrases that the model keeps inserting
+  base = base
+    .replace(/\bshowcasing\b/gi, "showing")
+    .replace(/\bon full display\b/gi, "out")
+    .replace(/\bconfidently\b/gi, "")
+    .replace(/\baccentuat\w*\b/gi, "")
+    .replace(/\bhighlighting\b/gi, "")
+    .replace(/\bnothing more to see here,?\s*/gi, "")
+    .replace(/\ball its glory\b/gi, "")
+    .replace(/\bthe perfect curve of\b/gi, "")
+    .replace(/\bmaking\s+\w+\s+stand out\s*(even more)?\b/gi, "")
+    .replace(/\bintricate design of\b/gi, "")
+    .replace(/\bthe background is\b/gi, "")
+    .replace(/\bsilhouette\b/gi, "body")
+    .replace(/\bcomplement\w*\b/gi, "")
+    .replace(/\bstanding\s+confidently\b/gi, "")
+    .replace(/\bmy\s+features\b/gi, "me")
+    .replace(/\bwith\s+hands?\s+behind\s+(her|my)\s+head\b/gi, "")
+    .replace(/\barms?\s+crossed\s+over\s+(her|my)\s+(chest|breasts?)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
   if (!base) {
-    const fallback = isTitle ? "Sexy moment" : "Seductive mood.";
+    const fallback = isTitle ? "My leaked nudes are out" : "This was supposed to stay private but here we are.";
     return `${fallback} ${emoji}`;
   }
 
@@ -720,7 +954,7 @@ function getVideoDurationSeconds(videoPath) {
 
 function buildVideoFrameTimestamps(
   durationSeconds,
-  frameCount = VIDEO_ANALYSIS_FRAME_COUNT
+  frameCount = DEFAULT_VIDEO_ANALYSIS_FRAME_COUNT
 ) {
   const safeCount = Math.max(1, Math.min(10, Math.round(frameCount || 4)));
 
@@ -743,7 +977,8 @@ function buildVideoFrameTimestamps(
 function extractVideoFrames(
   videoPath,
   durationSeconds,
-  frameCount = VIDEO_ANALYSIS_FRAME_COUNT
+  frameCount = DEFAULT_VIDEO_ANALYSIS_FRAME_COUNT,
+  maxSize = DEFAULT_AI_IMAGE_MAX_SIZE
 ) {
   if (!hasFfmpeg()) return [];
 
@@ -763,8 +998,8 @@ function extractVideoFrames(
         "-ss", String(timestamp),
         "-i", videoPath,
         "-vframes", "1",
-        "-vf", "scale='min(512,iw)':'min(512,ih)':force_original_aspect_ratio=decrease",
-        "-q:v", "2",
+        "-vf", `scale='min(${maxSize},iw)':'min(${maxSize},ih)':force_original_aspect_ratio=decrease`,
+        "-q:v", "4",
         tempFile,
       ],
       { stdio: "ignore" }
@@ -776,6 +1011,51 @@ function extractVideoFrames(
   }
 
   return frames;
+}
+
+async function recheckVipWithVision({ env, mediaType, base64Images, durationInfo }) {
+  const prompt = `Strict VIP classifier. Look at this ${mediaType}${mediaType === "video" ? " across all supplied frames" : ""}.${durationInfo}
+
+VIP=true ONLY if at least one is clearly visible:
+- bare nipples / bare breasts with nipples exposed, no bra/top/bikini covering them
+- bare pussy/vagina/vulva/labia/crotch exposed, no panties/thong/bikini/underwear covering it
+
+For rear views, inspect between the legs carefully. If the bare vulva/crotch area is visible with no panties, nudePussy=true.
+VIP=false for bra, bikini, lingerie, panties, thong, covered nipples, covered crotch, implied nudity, cleavage, sideboob, or bare ass alone.
+
+JSON only:
+{"contentSummary":"short clinical VIP evidence","nudeNipples":false,"nudePussy":false,"vip":false}`;
+
+  const response = await fetch(`${env.OLLAMA_URL}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: env.OLLAMA_MODEL,
+      format: "json",
+      stream: false,
+      keep_alive: env.OLLAMA_KEEP_ALIVE,
+      options: {
+        temperature: 0.1,
+        repeat_penalty: 1.1,
+        num_predict: 180,
+      },
+      messages: [
+        {
+          role: "user",
+          content: prompt,
+          images: base64Images,
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`VIP recheck failed: ${response.status} ${errText}`);
+  }
+
+  const data = await response.json();
+  return parseJsonFromText(data.message?.content);
 }
 
 /* ------------------------------------------------------------------ */
@@ -800,11 +1080,12 @@ async function analyzeWithVision({
     framePaths = extractVideoFrames(
       filePath,
       videoDurationSeconds,
-      VIDEO_ANALYSIS_FRAME_COUNT
+      env.VIDEO_ANALYSIS_FRAME_COUNT,
+      env.AI_IMAGE_MAX_SIZE
     );
     tempFiles.push(...framePaths);
   } else {
-    const resized = createResizedImageForAi(filePath);
+    const resized = createResizedImageForAi(filePath, env.AI_IMAGE_MAX_SIZE);
     if (resized) {
       framePaths = [resized];
       tempFiles.push(resized);
@@ -826,42 +1107,28 @@ async function analyzeWithVision({
   }
 
   const allowedTagsList = allowedTags.join(", ");
-  const trendTermsList = (trendingTerms || []).join(", ");
+  const trendTermsList = (trendingTerms || []).slice(0, 20).join(", ");
   const titleStyleGuide = pickFromPool(`${filename}:title-style`, TITLE_STYLE_GUIDES);
   const durationInfo =
     mediaType === "video" && Number.isFinite(videoDurationSeconds)
       ? `\nVideo duration: ${Math.round(videoDurationSeconds)} seconds.`
       : "";
 
-  const prompt = `Adult content SEO analyst. Analyze this ${mediaType} frame.${durationInfo}
+  const systemMessage = `Return compact JSON only. Write title/description as dirty first-person creator copy, not narrator photo description. Mention only visible things.`;
 
-Describe what you SEE: body parts, actions, nudity level, setting.
+  const prompt = `Analyze this ${mediaType}${mediaType === "video" ? " across all frames" : ""}.${durationInfo}
 
-VIP RULE (IMPORTANT): Set "vip" to true ONLY if at least one of these is clearly visible:
-- Naked pussy/vagina (uncovered, no panties)
-- Naked breasts/boobs with nipples visible (no bra or covering)
-- No panties / bare crotch clearly visible
-Otherwise vip=false.
-Examples of vip=false: bra on, panties on, lingerie/swimsuit that still covers nipples or pussy, hands/pose/angle covering intimate parts, sideboob/cleavage only, implied nudity, transparent clothes without clear direct visibility.
+contentSummary: max 35 words. Include clothing, visible body parts, pose/setting, and append exact markers:
+NUDE_NIPPLES=YES/NO NUDE_PUSSY=YES/NO NUDE_ASS=YES/NO.
+NUDE_NIPPLES=YES only for bare nipples/no bra. NUDE_PUSSY=YES only for bare vagina/vulva/labia/crotch/no panties; check rear views between legs. Bare ass alone is not VIP.
 
-Title (max 60 chars): Write as if the GIRL HERSELF is posting this. First person, flirty, teasing tone. 1 emoji at end, English.
-Make it scene-specific and fresh, based on what is actually visible. Mention the real action, pose, setting, outfit, or body part if relevant.
-Use this title approach for THIS file: ${titleStyleGuide}
-Avoid generic titles that could fit any file.
-Never use these exact phrases: "Come see what's under my...", "Just got out of the shower...", "I can't stop touching myself..."
-NO filename "${filename}", NO generic/boring words (sexy/hot/video/content/showcase).
+vip: true only if NUDE_NIPPLES=YES or NUDE_PUSSY=YES.
+hashtags: 5-10 only from: ${allowedTagsList}
+Visible tags only. Trends if relevant: ${trendTermsList}
+title: max 60 chars, ${titleStyleGuide}, dirty talk, 1 emoji, no filename "${filename}".
+description: max 170 chars, dirty/flirty, scene-specific, 1 emoji, don't repeat title.
 
-Description (max 200 chars): Also first person from the girl's perspective. Teasing, inviting the viewer. 1 emoji, English.
-Keep it specific to the visible scene. Do not reuse the title wording.
-
-Hashtags: pick 5-12 ONLY from: ${allowedTagsList}
-Prioritize direct trigger tags first when they clearly match what is visible, especially: hot, sexy, boobs, big tits, ass, pussy, solo, nude.
-Put the strongest click-driving tags first, then add scene/action tags.
-Trending terms from adult sites: ${trendTermsList}
-Pick 1-5 matching terms. Rate relevance 0-100.
-
-JSON only:
-{"title":"...","description":"...","hashtags":[],"vip":true,"trendTerms":[],"trendScore":0,"contentSummary":"what you see"}`;
+JSON: {"contentSummary":"","vip":false,"hashtags":[],"title":"","description":"","trendTerms":[],"trendScore":0}`;
 
   let response;
   try {
@@ -872,12 +1139,17 @@ JSON only:
         model: env.OLLAMA_MODEL,
         format: "json",
         stream: false,
+        keep_alive: env.OLLAMA_KEEP_ALIVE,
         options: {
-          temperature: 0.75,
-          repeat_penalty: 1.15,
-          num_predict: 512,
+          temperature: 0.45,
+          repeat_penalty: 1.08,
+          num_predict: env.OLLAMA_NUM_PREDICT,
         },
         messages: [
+          {
+            role: "system",
+            content: systemMessage,
+          },
           {
             role: "user",
             content: prompt,
@@ -930,17 +1202,52 @@ JSON only:
   }
   hashtags = sortTagsByPriority(hashtags).slice(0, MAX_ITEM_HASHTAGS);
 
-  // VIP — directly from model's vision analysis
-  const vip = Boolean(parsed.vip);
+  // Content summary — must be parsed before validation uses it
+  let contentSummary = String(parsed.contentSummary || "").trim();
+
+  // Validate tags against content summary — remove action tags not supported by visual analysis
+  hashtags = validateTagsFromContent(hashtags, contentSummary);
+
+  // VIP is derived from visual evidence in contentSummary only.
+  // Do not trust parsed.vip by itself: bra/panties must stay non-VIP.
+  let vip = deriveVipFromItemEvidence({
+    contentSummary,
+    title,
+    description,
+    hashtags,
+  });
+
+  if (env.VIP_RECHECK && !vip && shouldRunVipRecheck(contentSummary, hashtags)) {
+    try {
+      const recheck = await recheckVipWithVision({
+        env,
+        mediaType,
+        base64Images,
+        durationInfo,
+      });
+      const recheckSummary = String(recheck.contentSummary || "").trim();
+      const recheckEvidence = [
+        recheckSummary,
+        `NUDE_NIPPLES=${recheck.nudeNipples === true ? "YES" : "NO"}`,
+        `NUDE_PUSSY=${recheck.nudePussy === true ? "YES" : "NO"}`,
+      ].join(" ");
+
+      if (deriveVipFromContent(recheckEvidence)) {
+        vip = true;
+        contentSummary = [contentSummary, `VIP recheck: ${recheckSummary}`]
+          .filter(Boolean)
+          .join(" ");
+      }
+    } catch (err) {
+      console.warn(`⚠️  VIP recheck skipped for ${filename}: ${err.message}`);
+    }
+  }
 
   // Trend terms
   const trendTerms = Array.isArray(parsed.trendTerms)
     ? parsed.trendTerms.filter((t) => typeof t === "string" && t.trim()).slice(0, 5)
     : [];
   const trendScore = Math.max(0, Math.min(100, Math.round(Number(parsed.trendScore) || 0)));
-
-  // Content summary for logging
-  const contentSummary = String(parsed.contentSummary || "").trim();
 
   // Quality check
   if (
@@ -1056,18 +1363,30 @@ async function buildConfig(env) {
     const existing = existingItemsByFile.get(file);
 
     if (existing) {
+      const existingTitle = String(existing.title || "").trim();
+      const existingDescription = String(existing.description || "").trim();
+      const existingHashtags = normalizeTags(existing.hashtags || []);
+      const existingContentSummary = String(existing.contentSummary || "").trim();
+      const evidenceVip = deriveVipFromItemEvidence({
+        contentSummary: existingContentSummary,
+        title: existingTitle,
+        description: existingDescription,
+        hashtags: existingHashtags,
+      });
+
       return {
         filePath: fullPath,
         fileName: file,
         mediaType,
-        title: String(existing.title || "").trim(),
-        description: String(existing.description || "").trim(),
-        hashtags: normalizeTags(existing.hashtags || []),
+        title: existingTitle,
+        description: existingDescription,
+        hashtags: existingHashtags,
         trendTermsUsed: Array.isArray(existing.trendTermsUsed)
           ? existing.trendTermsUsed
           : [],
         trendScore: Number(existing.trendScore || 0),
-        vip: Boolean(existing.vip),
+        vip: Boolean(existing.vip) || evidenceVip,
+        contentSummary: existingContentSummary,
         videoDurationSeconds: Number.isFinite(existing.videoDurationSeconds)
           ? Math.round(existing.videoDurationSeconds)
           : null,
@@ -1085,6 +1404,7 @@ async function buildConfig(env) {
       description: "",
       hashtags: [],
       vip: false,
+      contentSummary: "",
       videoDurationSeconds: null,
       uploaded: false,
       analysisAttempted: false,
@@ -1214,6 +1534,7 @@ async function buildConfig(env) {
     let ai;
     let usedFallback = false;
     let lastModelError = null;
+    const analysisStartedAt = Date.now();
     const attempts = Math.max(1, Number(env.MODEL_RETRY_COUNT || 0) + 1);
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -1257,6 +1578,7 @@ async function buildConfig(env) {
             `   📈 Trends: ${trendTerms.join(", ")} (score: ${scoreLabel})`
           );
         }
+        logInfo(`   ⏱️  Analysis time: ${formatDuration((Date.now() - analysisStartedAt) / 1000)}`);
         logInfo(`   ${ai.vip ? "🔞 VIP: YES (explicit nudity)" : "✅ VIP: no"}`);
 
         lastModelError = null;
@@ -1281,6 +1603,7 @@ async function buildConfig(env) {
         description: "",
         hashtags: [],
         vip: false,
+        contentSummary: "",
         trendTermsUsed: [],
         trendScore: 0,
         videoDurationSeconds: Number.isFinite(videoDurationSeconds)
@@ -1299,6 +1622,7 @@ async function buildConfig(env) {
       trendTermsUsed: ai.trendTermsUsed || [],
       trendScore: ai.trendScore || 0,
       vip: Boolean(ai.vip),
+      contentSummary: ai.contentSummary || "",
       videoDurationSeconds: ai.videoDurationSeconds,
       uploaded: false,
       analysisAttempted: true,
@@ -1336,6 +1660,7 @@ async function buildConfig(env) {
       current.trendTermsUsed = result.trendTermsUsed || [];
       current.trendScore = result.trendScore || 0;
       current.vip = Boolean(result.vip);
+      current.contentSummary = result.contentSummary || "";
       current.videoDurationSeconds = result.videoDurationSeconds;
       current.uploaded = false;
       current.analysisAttempted = Boolean(result.analysisAttempted);
@@ -1384,7 +1709,14 @@ async function main() {
   console.log(`🎯 Analyzed: ${analyzedCount}/${config.items.length}`);
 }
 
-main().catch((err) => {
-  console.error("❌ Failed:", err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("❌ Failed:", err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  deriveVipFromContent,
+  deriveVipFromItemEvidence,
+};

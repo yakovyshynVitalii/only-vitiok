@@ -96,6 +96,48 @@ describe("upload target helpers", () => {
     });
   });
 
+  test("parseUploadTargets strips locale from collection URLs", async () => {
+    const { parseUploadTargets } = await loadModule();
+
+    expect(
+      parseUploadTargets({
+        UPLOAD_COLLECTIONS: JSON.stringify([
+          {
+            createUrl: "https://collections.only-nice.com/ru/collection/abc-123",
+          },
+          {
+            createUrl: "https://collections.only-nice.com/en/collection/def-456",
+          },
+          {
+            createUrl: "https://collections.only-nice.com/collection/ghi-789",
+          },
+        ]),
+      })
+    ).toEqual({
+      distributionMode: "range",
+      targets: [
+        {
+          collectionId: "abc-123",
+          createUrl: "https://collections.only-nice.com/collection/abc-123",
+          rangeStart: null,
+          rangeEnd: null,
+        },
+        {
+          collectionId: "def-456",
+          createUrl: "https://collections.only-nice.com/collection/def-456",
+          rangeStart: null,
+          rangeEnd: null,
+        },
+        {
+          collectionId: "ghi-789",
+          createUrl: "https://collections.only-nice.com/collection/ghi-789",
+          rangeStart: null,
+          rangeEnd: null,
+        },
+      ],
+    });
+  });
+
   test("planUploads respects manual ranges and leaves gaps unassigned", async () => {
     const { planUploads } = await loadModule();
     const items = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }];

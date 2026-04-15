@@ -11,6 +11,10 @@ function extractCollectionId(createUrl) {
   return match ? match[1] : "";
 }
 
+function stripLocaleFromCollectionUrl(url) {
+  return String(url || "").replace(/\/[a-z]{2}(\/collection\/)/i, "$1");
+}
+
 function normalizeAssetCount(value) {
   if (value == null) return null;
 
@@ -30,7 +34,7 @@ function normalizeRangePoint(value) {
 
 function normalizeTarget(target, env) {
   const collectionId = String(target?.collectionId || "").trim();
-  const explicitCreateUrl = String(target?.createUrl || "").trim();
+  const explicitCreateUrl = stripLocaleFromCollectionUrl(String(target?.createUrl || "").trim());
   const createUrl =
     explicitCreateUrl || buildCreateUrl(env?.BASE_URL, collectionId);
   let rangeStart = normalizeRangePoint(target?.rangeStart);
