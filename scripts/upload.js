@@ -169,20 +169,52 @@ async function applyVipFlag(page, vip) {
   const vipCheckbox = page
     .locator('input[type="checkbox"][name="vip"]')
     .first();
-  if ((await vipCheckbox.count()) === 0) {
-    console.log("⚠️  VIP checkbox not found");
+  if ((await vipCheckbox.count()) > 0) {
+    const visible = await vipCheckbox.isVisible().catch(() => false);
+    const checked = await vipCheckbox.isChecked().catch(() => false);
+    if (visible && !checked) {
+      await vipCheckbox.check().catch(async () => {
+        await vipCheckbox.click().catch(() => {});
+      });
+    }
+
+    const finalState = await vipCheckbox.isChecked().catch(() => false);
+    if (finalState) {
+      console.log("👑 VIP: enabled");
+      return;
+    }
+  }
+
+  const vipContentLabels = [/^VIP-контент$/i, /^VIP content$/i];
+  for (const label of vipContentLabels) {
+    const vipBlock = page
+      .locator('div[class*="_base_"][class*="cursor-pointer"]', {
+        hasText: label,
+      })
+      .last();
+    await vipBlock
+      .waitFor({ state: "visible", timeout: 2500 })
+      .catch(() => {});
+
+    if ((await vipBlock.count().catch(() => 0)) === 0) continue;
+
+    await vipBlock.scrollIntoViewIfNeeded().catch(() => {});
+    await vipBlock.click({ timeout: 5000 }).catch(async () => {
+      await vipBlock.click({ force: true, timeout: 5000 }).catch(async () => {
+        const handle = await vipBlock.elementHandle().catch(() => null);
+        await handle?.evaluate((el) => {
+          el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+          el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+          el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+      });
+    });
+    await page.waitForTimeout(250);
+    console.log("👑 VIP: content switch clicked");
     return;
   }
 
-  const checked = await vipCheckbox.isChecked().catch(() => false);
-  if (!checked) {
-    await vipCheckbox.check().catch(async () => {
-      await vipCheckbox.click().catch(() => {});
-    });
-  }
-
-  const finalState = await vipCheckbox.isChecked().catch(() => false);
-  console.log(`👑 VIP: ${finalState ? "enabled" : "not enabled"}`);
+  console.log("⚠️  VIP switch not found");
 }
 
 async function fillMetadata(page, item) {

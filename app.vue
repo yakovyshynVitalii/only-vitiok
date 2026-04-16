@@ -176,6 +176,10 @@ const analysisProgress = computed(() => {
   return { total, done, percent };
 });
 
+const uploadedCount = computed(
+  () => configItems.value.filter((item) => item.uploaded).length
+);
+
 const configItems = computed<ConfigItem[]>(() => {
   const items = (configData.value as { items?: unknown[] } | null)?.items;
   return Array.isArray(items) ? (items as ConfigItem[]) : [];
@@ -1713,7 +1717,7 @@ onBeforeUnmount(() => {
           <!-- ═══════════ MEDIA CARDS GRID ═══════════ -->
           <div v-if="configItems.length" class="media-pagination-bar">
             <span class="muted-text small-text">
-              {{ configItems.length }} items total — page {{ mediaPage }}/{{ mediaTotalPages }}
+              {{ configItems.length }} items total — {{ uploadedCount }} uploaded — page {{ mediaPage }}/{{ mediaTotalPages }}
             </span>
             <div class="media-pagination-btns">
               <UButton
@@ -1756,7 +1760,7 @@ onBeforeUnmount(() => {
               v-for="(item, pIndex) in paginatedItems"
               :key="item.filePath || item.fileName || pIndex"
               class="media-card-item"
-              :class="{ 'is-vip': item.vip }"
+              :class="{ 'is-vip': item.vip, 'is-uploaded': item.uploaded }"
             >
               <!-- Preview -->
               <div class="media-preview">
@@ -1790,6 +1794,11 @@ onBeforeUnmount(() => {
                 <div v-if="isVideoItem(item)" class="media-type-badge">
                   <UIcon name="i-lucide-video" class="size-3" />
                 </div>
+
+                <div v-if="item.uploaded" class="uploaded-badge">
+                  <UIcon name="i-lucide-check" class="size-3" />
+                  Uploaded
+                </div>
               </div>
 
               <!-- Card body -->
@@ -1797,13 +1806,16 @@ onBeforeUnmount(() => {
                 <!-- VIP + index row -->
                 <div class="card-top-row">
                   <span class="card-index">#{{ (mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex + 1 }}</span>
-                  <button
-                    class="vip-toggle"
-                    :class="{ active: item.vip }"
-                    @click="updateCardField((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex, 'vip', !item.vip)"
-                  >
-                    {{ item.vip ? '★ VIP' : '☆ VIP' }}
-                  </button>
+                  <div class="card-status-row">
+                    <span v-if="item.uploaded" class="uploaded-chip">Uploaded</span>
+                    <button
+                      class="vip-toggle"
+                      :class="{ active: item.vip }"
+                      @click="updateCardField((mediaPage - 1) * MEDIA_PAGE_SIZE + pIndex, 'vip', !item.vip)"
+                    >
+                      {{ item.vip ? '★ VIP' : '☆ VIP' }}
+                    </button>
+                  </div>
                 </div>
 
                 <UInput
@@ -2579,6 +2591,15 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 14px rgba(245, 158, 11, 0.08);
 }
 
+.media-card-item.is-uploaded {
+  border-color: rgba(34, 197, 94, 0.55);
+}
+
+.media-card-item.is-vip.is-uploaded {
+  border-color: rgba(132, 204, 22, 0.65);
+  box-shadow: 0 0 16px rgba(34, 197, 94, 0.08);
+}
+
 .media-preview {
   position: relative;
   width: 100%;
@@ -2632,6 +2653,24 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
+.uploaded-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(22, 101, 52, 0.9);
+  color: #dcfce7;
+  font-size: 0.66rem;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+}
+
 .media-card-body {
   padding: 10px;
   display: grid;
@@ -2649,6 +2688,28 @@ onBeforeUnmount(() => {
   font-size: 0.68rem;
   font-weight: 700;
   color: var(--text-muted);
+}
+
+.card-status-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
+}
+
+.uploaded-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.12);
+  color: #86efac;
+  font-size: 0.64rem;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .vip-toggle {
