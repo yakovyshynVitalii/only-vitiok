@@ -5,6 +5,8 @@ const require = createRequire(import.meta.url);
 const {
   deriveVipFromContent,
   deriveVipFromItemEvidence,
+  enforceSexyTone,
+  finalizeTitleCandidate,
 } = require("../../scripts/generate-config.js") as {
   deriveVipFromContent: (contentSummary: string) => boolean;
   deriveVipFromItemEvidence: (item: {
@@ -13,6 +15,14 @@ const {
     description?: string;
     hashtags?: string[];
   }) => boolean;
+  enforceSexyTone: (
+    text: string,
+    options: { isTitle?: boolean; emoji?: string; maxLength?: number }
+  ) => string;
+  finalizeTitleCandidate: (
+    title: string,
+    options: { emoji: string }
+  ) => string;
 };
 
 describe("deriveVipFromContent", () => {
@@ -180,5 +190,27 @@ describe("deriveVipFromContent", () => {
         hashtags: ["ass", "blonde", "nude", "bedroom"],
       })
     ).toBe(true);
+  });
+});
+
+describe("generated title length", () => {
+  test("keeps appended emoji inside the 60 character title limit", () => {
+    const title = enforceSexyTone("A".repeat(80), {
+      isTitle: true,
+      emoji: "🔥",
+      maxLength: 60,
+    });
+
+    expect(title.length).toBeLessThanOrEqual(60);
+    expect(title.endsWith(" 🔥")).toBe(true);
+  });
+
+  test("reserves enough room for multi-code-unit emoji", () => {
+    const title = finalizeTitleCandidate("B".repeat(80), {
+      emoji: "❤️‍🔥",
+    });
+
+    expect(title.length).toBeLessThanOrEqual(60);
+    expect(title.endsWith(" ❤️‍🔥")).toBe(true);
   });
 });

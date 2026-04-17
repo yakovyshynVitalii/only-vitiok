@@ -284,12 +284,13 @@ async function ensureCollectionLoaded(page, createUrl) {
   const env = getEnv();
   const config = readConfig(env.MEDIA_CONFIG_PATH);
   const activeTargets = getActiveUploadTargets(config, env);
-  const storageStatePath = ensureStorageStateExists();
 
   if (!activeTargets.length) {
     console.log("✅ No collections with assigned assets found for tag sync");
     return;
   }
+
+  const storageStatePath = ensureStorageStateExists();
 
   const browser = await chromium.launch({ headless: env.HEADLESS });
   const context = await browser.newContext({ storageState: storageStatePath });

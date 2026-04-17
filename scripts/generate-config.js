@@ -6,6 +6,7 @@ const googleTrends = (() => { try { return require("google-trends-api"); } catch
 
 const TARGET_GLOBAL_HASHTAGS = Number(process.env.GLOBAL_TAG_LIMIT) === 100 ? 100 : 15;
 const MAX_ITEM_HASHTAGS = 12;
+const MAX_TITLE_LENGTH = 60;
 const DEFAULT_AI_IMAGE_MAX_SIZE = 384;
 const DEFAULT_VIDEO_ANALYSIS_FRAME_COUNT = 2;
 const DEFAULT_OLLAMA_NUM_PREDICT = 360;
@@ -718,7 +719,61 @@ function validateTagsFromContent(tags, contentSummary) {
   });
 }
 
-function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
+function splitGraphemes(value) {
+  const text = String(value || "");
+  if (typeof Intl !== "undefined" && Intl.Segmenter) {
+    return Array.from(
+      new Intl.Segmenter("en", { granularity: "grapheme" }).segment(text),
+      (part) => part.segment
+    );
+  }
+  return Array.from(text);
+}
+
+function trimToLength(text, maxLength) {
+  const limit = Math.max(0, Number(maxLength) || 0);
+  let out = "";
+  for (const part of splitGraphemes(text)) {
+    if (out.length + part.length > limit) break;
+    out += part;
+  }
+  return out.trimEnd();
+}
+
+function truncateText(text, maxLength = MAX_TITLE_LENGTH) {
+  const limit = Math.max(0, Number(maxLength) || 0);
+  const normalized = String(text || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= limit) return normalized;
+  if (limit === 0) return "";
+  if (limit === 1) return "…";
+  return `${trimToLength(normalized, limit - 1)}…`;
+}
+
+function appendEmoji(text, emoji, maxLength) {
+  const base = String(text || "").trim();
+  const suffix = emoji ? ` ${emoji}` : "";
+  const hasEmoji = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(
+    base
+  );
+
+  if (!Number.isFinite(maxLength)) {
+    return hasEmoji || !suffix ? base : `${base}${suffix}`;
+  }
+
+  if (hasEmoji || !suffix) {
+    return truncateText(base, maxLength);
+  }
+
+  const bodyLimit = Math.max(0, maxLength - suffix.length);
+  const trimmedBase = truncateText(base, bodyLimit);
+  const candidate = `${trimmedBase}${suffix}`.trim();
+  return truncateText(candidate, maxLength);
+}
+
+function enforceSexyTone(
+  text,
+  { isTitle = false, emoji = "🔥", maxLength } = {}
+) {
   let base = String(text || "").trim();
 
   // Strip narrator-style openings (model loves starting with "Standing...", "Sitting...", etc.)
@@ -755,14 +810,10 @@ function enforceSexyTone(text, { isTitle = false, emoji = "🔥" } = {}) {
     .trim();
 
   if (!base) {
-    const fallback = isTitle ? "My leaked nudes are out" : "This was supposed to stay private but here we are.";
-    return `${fallback} ${emoji}`;
+    base = isTitle ? "My leaked nudes are out" : "This was supposed to stay private but here we are.";
   }
 
-  const hasEmoji = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(
-    base
-  );
-  return hasEmoji ? base : `${base} ${emoji}`;
+  return appendEmoji(base, emoji, maxLength);
 }
 
 function maybeAddLeakWording(
@@ -780,12 +831,6 @@ function maybeAddLeakWording(
   const separator = /[.!?…]$/.test(base) ? " " : ". ";
   const candidate = `${base}${separator}${leakPhrase}`;
   return candidate.length <= maxLength ? candidate : base;
-}
-
-function truncateText(text, maxLength = 60) {
-  const normalized = String(text || "").replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) return normalized;
-  return normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd() + "…";
 }
 
 function normalizeTitleForComparison(title) {
@@ -819,8 +864,11 @@ function buildTitleCandidateFromDescription(description) {
 function finalizeTitleCandidate(title, { emoji }) {
   const sanitized = sanitizeEnglishText(title, "");
   const cleaned = removeOverusedTitleWords(sanitized, "");
-  const truncated = truncateText(cleaned, 56);
-  return enforceSexyTone(truncated, { isTitle: true, emoji });
+  return enforceSexyTone(cleaned, {
+    isTitle: true,
+    emoji,
+    maxLength: MAX_TITLE_LENGTH,
+  });
 }
 
 function ensureUniqueGeneratedTitle({ title, description, fileName }, usedTitles) {
@@ -1176,7 +1224,11 @@ JSON: {"contentSummary":"","vip":false,"hashtags":[],"title":"","description":""
   const rawTitle = sanitizeEnglishText(parsed.title, "");
   const cleanedTitle = removeOverusedTitleWords(rawTitle, "");
   const titleEmoji = pickEmoji(`${filename}:title`, TITLE_EMOJIS);
-  const title = enforceSexyTone(cleanedTitle, { isTitle: true, emoji: titleEmoji });
+  const title = enforceSexyTone(cleanedTitle, {
+    isTitle: true,
+    emoji: titleEmoji,
+    maxLength: MAX_TITLE_LENGTH,
+  });
 
   // Process description
   const rawDescription = sanitizeEnglishText(parsed.description, "");
@@ -1449,6 +1501,14 @@ async function buildConfig(env) {
       .filter(Boolean)
   );
 
+  if (completed > 0) {
+    console.log(
+      `↩️  Resume: keeping ${completed}/${total} already analyzed item(s), ${total - completed} pending.`
+    );
+  } else {
+    console.log("🆕 Resume: no completed items found, starting analysis from the first file.");
+  }
+
   function clearProgressLine() {
     if (!process.stdout.isTTY) return;
     process.stdout.write(`\r${" ".repeat(lastProgressLineLength)}\r`);
@@ -1719,4 +1779,7 @@ if (require.main === module) {
 module.exports = {
   deriveVipFromContent,
   deriveVipFromItemEvidence,
+  enforceSexyTone,
+  finalizeTitleCandidate,
+  truncateText,
 };

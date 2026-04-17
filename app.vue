@@ -974,6 +974,11 @@ async function loadConfig() {
   configPath.value = config.configPath;
   configText.value = config.text;
   configData.value = parseConfigData(config.text);
+
+  if (!isRunningAnalyze.value) {
+    const { total, done } = analysisProgress.value;
+    canResumeAnalyze.value = total > 0 && done > 0 && done < total;
+  }
 }
 
 async function saveConfig() {

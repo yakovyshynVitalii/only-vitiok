@@ -107,9 +107,10 @@ function parseUploadTargets(env) {
   );
 
   if (!fallbackTarget) {
-    throw new Error(
-      "No upload collections configured. Add CREATE_URL or UPLOAD_COLLECTIONS to .env"
-    );
+    return {
+      distributionMode,
+      targets: [],
+    };
   }
 
   return {

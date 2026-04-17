@@ -1,6 +1,5 @@
 import path from "node:path";
 import { importProjectRootMediaFiles } from "~/server/utils/media-files";
-import { resetConfigAnalysisState } from "~/server/utils/media-config";
 import { ensureMediaFolder, readSettings } from "~/server/utils/settings";
 import { runScriptTask } from "~/server/utils/process-runner";
 import {
@@ -33,12 +32,9 @@ export default defineEventHandler(async () => {
     );
   }
 
-  const resetResult = resetConfigAnalysisState(settings);
-  if (resetResult.cleared) {
-    runtimeLogs.push(
-      `Cleared previous analysis state for ${resetResult.itemCount} item(s) before starting a fresh analyze run.`
-    );
-  }
+  runtimeLogs.push(
+    "Resume mode enabled: existing analyzed cards will be kept and only pending media will be processed."
+  );
 
   const session = await startOllamaServe(ollamaUrl);
   runtimeLogs.push(...session.logs);

@@ -57,6 +57,26 @@ describe("upload target helpers", () => {
     });
   });
 
+  test("parseUploadTargets allows empty collection configuration", async () => {
+    const { parseUploadTargets } = await loadModule();
+
+    expect(parseUploadTargets({})).toEqual({
+      distributionMode: "range",
+      targets: [],
+    });
+    expect(
+      parseUploadTargets({
+        BASE_URL: "https://collections.only-nice.com",
+        COLLECTION_ID: "",
+        CREATE_URL: "",
+        UPLOAD_COLLECTIONS: "[]",
+      })
+    ).toEqual({
+      distributionMode: "range",
+      targets: [],
+    });
+  });
+
   test("parseUploadTargets normalizes JSON targets and derives url from BASE_URL", async () => {
     const { parseUploadTargets } = await loadModule();
 

@@ -3,7 +3,6 @@ import { describe, expect, test, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   readSettings: vi.fn(),
   ensureMediaFolder: vi.fn(),
-  resetConfigAnalysisState: vi.fn(),
   runScriptTask: vi.fn(),
   startOllamaServe: vi.fn(),
   warmupOllamaModel: vi.fn(),
@@ -14,10 +13,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock("~/server/utils/settings", () => ({
   readSettings: mocks.readSettings,
   ensureMediaFolder: mocks.ensureMediaFolder,
-}));
-
-vi.mock("~/server/utils/media-config", () => ({
-  resetConfigAnalysisState: mocks.resetConfigAnalysisState,
 }));
 
 vi.mock("~/server/utils/process-runner", () => ({
@@ -34,11 +29,6 @@ vi.mock("~/server/utils/ollama-runner", () => ({
 describe("POST /api/run/analyze", () => {
   test("runs analyze without auto upload", async () => {
     mocks.ensureMediaFolder.mockReturnValue("/tmp/media");
-    mocks.resetConfigAnalysisState.mockReturnValue({
-      configPath: "/tmp/media-config.json",
-      itemCount: 2,
-      cleared: true,
-    });
     mocks.readSettings.mockReturnValue({
       env: {
         AUTO_UPLOAD_AFTER_ANALYZE: "false",
@@ -61,13 +51,12 @@ describe("POST /api/run/analyze", () => {
     const result = await handler(event);
 
     expect(mocks.runScriptTask).toHaveBeenCalledTimes(1);
-    expect(mocks.resetConfigAnalysisState).toHaveBeenCalledTimes(1);
     expect(mocks.runScriptTask).toHaveBeenCalledWith(
       "analyze",
       "scripts/generate-config.js"
     );
     expect(result.analyzeOutput).toContain(
-      "Cleared previous analysis state for 2 item(s) before starting a fresh analyze run."
+      "Resume mode enabled: existing analyzed cards will be kept and only pending media will be processed."
     );
     expect(result.autoUpload).toBe(false);
     expect(result.analyzeOutput).toContain("serve-started");
@@ -77,11 +66,6 @@ describe("POST /api/run/analyze", () => {
 
   test("runs auto upload when AUTO_UPLOAD_AFTER_ANALYZE is true", async () => {
     mocks.ensureMediaFolder.mockReturnValue("/tmp/media");
-    mocks.resetConfigAnalysisState.mockReturnValue({
-      configPath: "/tmp/media-config.json",
-      itemCount: 1,
-      cleared: true,
-    });
     mocks.readSettings.mockReturnValue({
       env: {
         AUTO_UPLOAD_AFTER_ANALYZE: "true",
@@ -128,11 +112,6 @@ describe("POST /api/run/analyze", () => {
 
   test("stops model and serve in finally block even when analyze fails", async () => {
     mocks.ensureMediaFolder.mockReturnValue("/tmp/media");
-    mocks.resetConfigAnalysisState.mockReturnValue({
-      configPath: "/tmp/media-config.json",
-      itemCount: 1,
-      cleared: true,
-    });
     mocks.readSettings.mockReturnValue({
       env: {
         AUTO_UPLOAD_AFTER_ANALYZE: "false",

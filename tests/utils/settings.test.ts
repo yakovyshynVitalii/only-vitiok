@@ -82,7 +82,7 @@ describe("settings utils", () => {
         rangeEnd: 3,
       },
       {
-        collectionId: "",
+        collectionId: "manual-2",
         createUrl: "https://collections.only-nice.com/collection/manual-2",
         rangeStart: 4,
         rangeEnd: 8,
@@ -95,7 +95,7 @@ describe("settings utils", () => {
       "CREATE_URL=https://collections.only-nice.com/collection/abc-123"
     );
     expect(persisted).toContain(
-      'UPLOAD_COLLECTIONS=[{"collectionId":"abc-123","createUrl":"https://collections.only-nice.com/collection/abc-123","rangeStart":1,"rangeEnd":3},{"collectionId":"","createUrl":"https://collections.only-nice.com/collection/manual-2","rangeStart":4,"rangeEnd":8}]'
+      'UPLOAD_COLLECTIONS=[{"collectionId":"abc-123","createUrl":"https://collections.only-nice.com/collection/abc-123","rangeStart":1,"rangeEnd":3},{"collectionId":"manual-2","createUrl":"https://collections.only-nice.com/collection/manual-2","rangeStart":4,"rangeEnd":8}]'
     );
     expect(persisted).toContain("UPLOAD_DISTRIBUTION_MODE=range");
     expect(persisted).toContain("AUTO_UPLOAD_AFTER_ANALYZE=true");
@@ -165,6 +165,39 @@ describe("settings utils", () => {
         rangeEnd: null,
       },
     ]);
+  });
+
+  test("writeSettings clears legacy collection fields when upload collections are emptied", async () => {
+    const tempDir = makeTempDir();
+    tempDirs.push(tempDir);
+    process.chdir(tempDir);
+    fs.writeFileSync(
+      path.resolve(tempDir, ".env"),
+      [
+        "BASE_URL=https://collections.only-nice.com",
+        "COLLECTION_ID=old-collection",
+        "CREATE_URL=https://collections.only-nice.com/collection/old-collection",
+        'UPLOAD_COLLECTIONS=[{"collectionId":"old-collection","createUrl":"https://collections.only-nice.com/collection/old-collection","rangeStart":null,"rangeEnd":null}]',
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    const settingsMod = await import("~/server/utils/settings");
+
+    const next = settingsMod.writeSettings({
+      env: {
+        COLLECTION_ID: "old-collection",
+        CREATE_URL: "https://collections.only-nice.com/collection/old-collection",
+      },
+      collectionId: "",
+      uploadCollections: [],
+    });
+
+    expect(next.collectionId).toBe("");
+    expect(next.env.COLLECTION_ID).toBe("");
+    expect(next.env.CREATE_URL).toBe("");
+    expect(next.env.UPLOAD_COLLECTIONS).toBe("");
+    expect(next.uploadCollections).toEqual([]);
   });
 
   test("getMediaFolder/getConfigPath/ensureMediaFolder resolve paths from root", async () => {

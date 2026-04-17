@@ -81,6 +81,117 @@ function isFileInputDetachTimeout(err) {
   );
 }
 
+function isUploadSingleUrl(url) {
+  return /(?:^|[/?#&])upload-single(?:$|[/?#&])/i.test(String(url || ""));
+}
+
+function isRetryableUploadError(err) {
+  const message = String((err && err.message) || "");
+  return (
+    isFileInputDetachTimeout(err) ||
+    /upload-single/i.test(message) ||
+    /\b429\b/.test(message) ||
+    /rate\s*limit|too many requests/i.test(message)
+  );
+}
+
+function createUploadSingleFailureWatcher(page) {
+  let uploadError = null;
+  const pendingUploads = new Map();
+  const pendingChecks = new Set();
+
+  const rememberFailure = (message) => {
+    if (!uploadError) uploadError = new Error(message);
+  };
+
+  const resolveUpload = (request) => {
+    const pending = pendingUploads.get(request);
+    if (!pending) return;
+    pending.resolve();
+    pendingUploads.delete(request);
+  };
+
+  const onRequest = (request) => {
+    const url = request.url();
+    if (!isUploadSingleUrl(url)) return;
+
+    let resolve;
+    const promise = new Promise((done) => {
+      resolve = done;
+    });
+    pendingUploads.set(request, { promise, resolve });
+  };
+
+  const onResponse = (response) => {
+    const url = response.url();
+    if (!isUploadSingleUrl(url)) return;
+
+    const check = (async () => {
+      if (response.ok()) return;
+
+      const status = response.status();
+      const statusText = response.statusText();
+      let details = "";
+
+      try {
+        details = (await response.text()).replace(/\s+/g, " ").trim();
+      } catch {}
+
+      const suffix = details ? ` — ${details.slice(0, 500)}` : "";
+      rememberFailure(`upload-single failed: ${status} ${statusText}${suffix}`);
+    })();
+
+    pendingChecks.add(check);
+    check.finally(() => {
+      pendingChecks.delete(check);
+      resolveUpload(response.request());
+    });
+  };
+
+  const onRequestFailed = (request) => {
+    const url = request.url();
+    if (!isUploadSingleUrl(url)) return;
+
+    const failure = request.failure();
+    rememberFailure(
+      `upload-single request failed: ${failure?.errorText || "unknown network error"}`
+    );
+    resolveUpload(request);
+  };
+
+  page.on("request", onRequest);
+  page.on("response", onResponse);
+  page.on("requestfailed", onRequestFailed);
+
+  return {
+    async throwIfFailed() {
+      await Promise.allSettled([...pendingChecks]);
+      if (uploadError) throw uploadError;
+    },
+    async waitForSettled(timeoutMs = 60000) {
+      const uploads = [...pendingUploads.values()].map((pending) => pending.promise);
+      if (uploads.length) {
+        let timer;
+        await Promise.race([
+          Promise.allSettled(uploads),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              reject(new Error(`upload-single did not finish within ${timeoutMs}ms`));
+            }, timeoutMs);
+          }),
+        ]).finally(() => clearTimeout(timer));
+      }
+      await Promise.allSettled([...pendingChecks]);
+      if (uploadError) throw uploadError;
+    },
+    dispose() {
+      page.off("request", onRequest);
+      page.off("response", onResponse);
+      page.off("requestfailed", onRequestFailed);
+    },
+  };
+}
+
 function notifyUploadFinished() {
   if (!process.stdout.isTTY) return;
   process.stdout.write("\x07");
@@ -298,6 +409,35 @@ async function clickDoneButton(page) {
   }
 }
 
+async function clickDoneButtonWatchingUpload(page, uploadWatcher) {
+  let done = false;
+  const donePromise = clickDoneButton(page);
+  donePromise.catch(() => {});
+  const failurePromise = (async () => {
+    while (!done) {
+      await page.waitForTimeout(500);
+      if (!done) await uploadWatcher.throwIfFailed();
+    }
+  })();
+  let failureError = null;
+
+  try {
+    await Promise.race([
+      donePromise,
+      failurePromise.catch((err) => {
+        failureError = err;
+        return null;
+      }),
+    ]);
+  } finally {
+    done = true;
+    await failurePromise.catch(() => {});
+  }
+
+  if (failureError) throw failureError;
+  await donePromise;
+}
+
 async function openUploadModal(page) {
   const openButtons = [
     "button:has(.i-majesticons\\:plus-line)",
@@ -358,13 +498,12 @@ async function runUploadOnce() {
       console.log(`🧹 Deleted files after successful full upload: ${deleted}`);
     }
     notifyUploadFinished();
-    return { retryRequested: false };
+    return { retryRequested: false, retryReason: "" };
   }
 
   if (!pendingPlan.length) {
-    throw new Error(
-      "No pending assets are assigned to upload collections. Increase asset counts or add another collection."
-    );
+    console.log("✅ No upload collections configured. Nothing to upload.");
+    return { retryRequested: false, retryReason: "" };
   }
 
   const browser = await chromium.launch({
@@ -374,6 +513,7 @@ async function runUploadOnce() {
   const context = await browser.newContext({ storageState: storageStatePath });
   const page = await context.newPage();
   let retryRequested = false;
+  let retryReason = "";
   let lastErrorMessage = "";
 
   for (const targetPlan of pendingPlan) {
@@ -414,20 +554,27 @@ async function runUploadOnce() {
 
       console.log(`\n📂 Next file: ${filePath}`);
 
+      let uploadWatcher = null;
       try {
         await openUploadModal(page);
 
+        uploadWatcher = createUploadSingleFailureWatcher(page);
         const fileInput = page.locator('input[type="file"]');
         await fileInput.setInputFiles(filePath);
+        await page.waitForTimeout(500);
+        await uploadWatcher.throwIfFailed();
 
         await fillMetadata(page, item);
+        await uploadWatcher.throwIfFailed();
 
-        await clickDoneButton(page);
+        await clickDoneButtonWatchingUpload(page, uploadWatcher);
+        await uploadWatcher.throwIfFailed();
 
         await page.locator('input[type="file"]').waitFor({
           state: "detached",
           timeout: 60000,
         });
+        await uploadWatcher.waitForSettled();
 
         item.uploaded = true;
         item.uploadedAt = new Date().toISOString();
@@ -446,14 +593,17 @@ async function runUploadOnce() {
         console.log(err.message);
         lastErrorMessage = err.message || "unknown_upload_error";
 
-        if (isFileInputDetachTimeout(err)) {
+        if (isRetryableUploadError(err)) {
           retryRequested = true;
+          retryReason = lastErrorMessage;
           console.log(
-            "⏳ File input detach timeout received. Upload will restart in 60 seconds."
+            "⏳ Upload did not finish cleanly. It will wait and retry without marking this file as uploaded."
           );
         }
 
         break;
+      } finally {
+        if (uploadWatcher) uploadWatcher.dispose();
       }
     }
 
@@ -464,7 +614,7 @@ async function runUploadOnce() {
 
   await browser.close();
   if (retryRequested) {
-    return { retryRequested: true };
+    return { retryRequested: true, retryReason };
   }
 
   if (lastErrorMessage) {
@@ -485,22 +635,22 @@ async function runUploadOnce() {
     );
   }
 
-  return { retryRequested: false };
+  return { retryRequested: false, retryReason: "" };
 }
 
-(async () => {
+async function main() {
   loadDotEnv();
 
   const retryDelayMs = Number(process.env.UPLOAD_RETRY_DELAY_MS || 60000);
   const maxAttempts = Number(process.env.UPLOAD_RESTART_ATTEMPTS || 3);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const { retryRequested } = await runUploadOnce();
+    const { retryRequested, retryReason } = await runUploadOnce();
     if (!retryRequested) return;
 
     if (attempt === maxAttempts) {
       throw new Error(
-        `Upload failed after ${maxAttempts} attempts (detach timeout on file input).`
+        `Upload failed after ${maxAttempts} attempts (${retryReason || "retryable upload error"}).`
       );
     }
 
@@ -512,7 +662,17 @@ async function runUploadOnce() {
     );
     await sleep(retryDelayMs);
   }
-})().catch((err) => {
-  console.error("❌ upload failed:", err.message);
-  process.exit(1);
-});
+}
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("❌ upload failed:", err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  isFileInputDetachTimeout,
+  isRetryableUploadError,
+  isUploadSingleUrl,
+};
