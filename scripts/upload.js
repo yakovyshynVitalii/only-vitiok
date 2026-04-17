@@ -95,6 +95,35 @@ function isRetryableUploadError(err) {
   );
 }
 
+function describeUploadSingleFailure({ ok, status, statusText, bodyText }) {
+  const details = String(bodyText || "").replace(/\s+/g, " ").trim();
+
+  if (!ok) {
+    const suffix = details ? ` — ${details.slice(0, 500)}` : "";
+    return `upload-single failed: ${status} ${statusText}${suffix}`;
+  }
+
+  let parsed = null;
+  try {
+    parsed = details ? JSON.parse(details) : null;
+  } catch {
+    return `upload-single returned invalid JSON success body: ${details.slice(0, 500)}`;
+  }
+
+  const payloadStatus = String(parsed?.status || "").toLowerCase();
+  const fileId = String(parsed?.fileId || "").trim();
+  if (payloadStatus === "success" && fileId) return "";
+
+  const message = String(parsed?.message || parsed?.error || "").trim();
+  const parts = [
+    `upload-single did not confirm success`,
+    payloadStatus ? `status=${payloadStatus}` : "",
+    fileId ? `fileId=${fileId}` : "missing fileId",
+    message,
+  ].filter(Boolean);
+  return parts.join(": ");
+}
+
 function createUploadSingleFailureWatcher(page) {
   let uploadError = null;
   const pendingUploads = new Map();
@@ -127,18 +156,21 @@ function createUploadSingleFailureWatcher(page) {
     if (!isUploadSingleUrl(url)) return;
 
     const check = (async () => {
-      if (response.ok()) return;
-
       const status = response.status();
       const statusText = response.statusText();
-      let details = "";
+      let bodyText = "";
 
       try {
-        details = (await response.text()).replace(/\s+/g, " ").trim();
+        bodyText = await response.text();
       } catch {}
 
-      const suffix = details ? ` — ${details.slice(0, 500)}` : "";
-      rememberFailure(`upload-single failed: ${status} ${statusText}${suffix}`);
+      const failure = describeUploadSingleFailure({
+        ok: response.ok(),
+        status,
+        statusText,
+        bodyText,
+      });
+      if (failure) rememberFailure(failure);
     })();
 
     pendingChecks.add(check);
@@ -672,6 +704,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  describeUploadSingleFailure,
   isFileInputDetachTimeout,
   isRetryableUploadError,
   isUploadSingleUrl,
